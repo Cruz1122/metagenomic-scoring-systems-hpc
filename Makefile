@@ -18,7 +18,8 @@ help:
 	@echo "make benchmark | make plots | make clean"
 
 data:
-	python data/generate_data.py --n-items $(N_ITEMS) --seed $(SEED) --out-dir $(DATA_DIR)
+	python data/generate_synthetic_dataset.py --out-dir $(DATA_DIR) \
+		--n-samples 100 --n-items $(N_ITEMS) --seed $(SEED)
 
 python-seq:
 	python python/sequential.py --k $(K) --seed $(SEED) --data-dir $(DATA_DIR)
@@ -54,4 +55,4 @@ clean:
 	$(MAKE) -C C_OpenMP_MPI clean || true
 	$(MAKE) -C CUDA clean || true
 	rm -f results/benchmark.csv results/benchmark_raw.csv results/plots/*.png
-	rm -f data/matrix_A.npy data/labels.npy data/profiles.npy data/*.csv data/metadata.json
+	rm -f data/npy/matrix_A.npy data/npy/labels.npy data/npy/profiles.npy data/metadata.json

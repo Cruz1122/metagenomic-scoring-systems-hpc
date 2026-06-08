@@ -15,7 +15,8 @@ OUT="results/benchmark.csv"
 mkdir -p results results/plots
 
 # 1. Generar datos sintéticos
-python data/generate_data.py --n-items "$N_ITEMS" --seed "$SEED" --out-dir "$DATA_DIR"
+python data/generate_synthetic_dataset.py --out-dir "$DATA_DIR" \
+    --n-samples 100 --n-items "$N_ITEMS" --seed "$SEED"
 
 # 2. Benchmark header
 echo "implementation,parallel_units,n_items,k,time_sec,auc,consistency,w1,w2,w3,seed" > "$RAW"

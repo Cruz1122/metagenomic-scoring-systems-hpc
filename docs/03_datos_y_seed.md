@@ -1,28 +1,44 @@
 # Datos y seed
 
-Comando:
+Comando (generación sintética para desarrollo):
 
 ```bash
-python data/generate_data.py --n-items 500 --seed 42 --signal 6.0 --out-dir data
+python data/scripts/generate_synthetic_dataset.py \
+    --out-dir data \
+    --n-samples 100 \
+    --n-items 500 \
+    --seed 42 \
+    --signal 2.2
 ```
 
 Parámetros:
 
 | Flag | Default | Descripción |
 |---|---|---|
-| `--n-items` | 50 | Número de items (columnas de `A` y filas de `profiles`) |
+| `--n-samples` | 100 | Número total de muestras (debe ser par) |
+| `--n-items` | 500 | Número de items (columnas de `A` y filas de `profiles`) |
 | `--seed` | 42 | Semilla para reproducibilidad |
-| `--signal` | 6.0 | Controla separabilidad: más alto = más separación entre sanos y enfermos |
+| `--signal` | 2.2 | Controla separabilidad: más alto = más separación entre sanos y enfermos |
+| `--concentration` | 240.0 | Concentración Dirichlet: menor = más ruido muestral |
+| `--dropout-rate` | 0.30 | Tasa base de dropout/ceros para taxones raros |
 | `--out-dir` | data | Directorio de salida |
 
-Archivos generados:
+Archivos generados (bajo `{out-dir}/`):
 
 ```text
-matrix_A.npy / matrix_A.csv     → matriz A (10 x N)
-labels.npy / labels.csv          → vector y (10 enteros: 5×0, 5×1)
-profiles.npy / profiles.csv      → matriz de perfiles (N x 3): columnas T, S, F
-metadata.json                    → seed, n_items, signal, true_w_synthetic
+csv/samples.csv           → metadatos de muestras (sample_id, label, group)
+csv/matrix_A.csv          → matriz A (100 x 500) en CSV
+npy/matrix_A.npy          → matriz A (100 x 500) en NumPy
+npy/labels.npy            → vector y (100 enteros: 50×0, 50×1)
+npy/profiles_TSF.npy      → matriz de perfiles (500 x 3): columnas T, S, F
+csv/metadata.csv          → variables poblacionales/ecológicas
+csv/functional_matrix.csv → marcadores funcionales proxy por item
+csv/item_profiles.csv     → perfiles T, S, F con nombres de taxones
+csv/item_mapping.csv      → mapeo item_id → taxon_name
+dataset_manifest.json     → metadatos del dataset generado
 ```
+
+> También existe `data/scripts/build_final_dataset.R` para reconstruir el dataset real desde `curatedMetagenomicData` (Bioconductor). Ese script es la ruta prevista para la presentación final del proyecto.
 
 `metadata.json` incluye los pesos sintéticos reales usados para inducir la señal:
 

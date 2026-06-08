@@ -1,0 +1,21 @@
+{
+  "dataset_name": "cMD_CRC100_balanced",
+  "seed": 42,
+  "samples_total": 100,
+  "healthy": 50,
+  "crc": 50,
+  "items": 500,
+  "matrix_A_shape": [
+    100,
+    500
+  ],
+  "labels_shape": [
+    100
+  ],
+  "profiles_TSF_shape": [
+    500,
+    3
+  ],
+  "row_sums_min": 0.9999998807907104,
+  "row_sums_max": 1.0000001192092896
+}
