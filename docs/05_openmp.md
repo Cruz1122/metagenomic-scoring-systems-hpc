@@ -21,7 +21,7 @@ Cada hilo usa un generador Xorshift independiente inicializado con `seed + 0x9e3
 
 ## Lectura de datos
 
-A diferencia de Python (que lee `.npy` binario), el código C lee archivos CSV (`matrix_A.csv`, `profiles.csv`, `labels.csv`) con `fscanf`. Esto es más lento pero portable y evita dependencias binarias.
+A diferencia de Python (que lee `.npy` binario), el código C lee archivos CSV (`matrix_A.csv`, `profiles_TSF.npy` se leería como `item_profiles.csv`) con `fscanf`. Esto es más lento pero portable y evita dependencias binarias.
 
 ## Patrón usado
 

@@ -48,7 +48,7 @@ scoring_metagenomico/
 ├── data/
 │   ├── __init__.py             → docstring del paquete
 │   ├── README.md               → descripción de datos generados
-│   └── generate_data.py        → [SCAFFOLD] genera datos sintéticos
+│   ├── generate_data.py        → genera dataset sintético (en scripts/)
 ├── python/
 │   ├── __init__.py             → docstring del paquete
 │   ├── common.py               → [SCAFFOLD] dataclass SearchResult + funciones vacías
@@ -103,9 +103,7 @@ pip install -r requirements.txt
 ### 1. Generar datos
 
 ```bash
-make data N_ITEMS=500 SEED=42
-# o manual:
-python data/generate_data.py --n-items 500 --seed 42 --signal 6.0 --out-dir data
+python data/scripts/generate_data.py
 ```
 
 ### 2. Python (baseline)
@@ -232,7 +230,8 @@ make clean
 
 ## Suposición explícita
 
-El contrato define perfiles `T_i`, `S_i`, `F_i`, pero el script base solo guardaba `A` e `y`. Sin esos perfiles no se puede calcular `P_i`. Por eso este scaffold genera además `profiles.npy` y `profiles.csv`. Documentado en `docs/03_datos_y_seed.md`.
+El contrato define perfiles `T_i`, `S_i`, `F_i` en `item_profiles.csv` y `profiles_TSF.npy`.
+`T` es magnitud diferencial en `[0,1]`. Ver `docs/11_dataset.md`.
 
 ---
 

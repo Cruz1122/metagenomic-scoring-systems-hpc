@@ -1,57 +1,18 @@
 {
-  "dataset_name": "synthetic_CRC100_balanced",
+  "dataset_name": "cMD_CRC100_balanced",
   "dataset_type": "synthetic-compatible",
-  "purpose": "debugging, development, I/O tests, preliminary HPC benchmarks",
+  "source_reference": "curatedMetagenomicData / Bioconductor compatible",
+  "disease_task": "colorectal_cancer_vs_healthy",
+  "positive_class": "CRC",
+  "negative_class": "healthy/control",
   "seed": 42,
-  "signal": 2.2,
-  "concentration": 240.0,
-  "dropout_rate": 0.3,
   "n_samples": 100,
+  "n_healthy": 50,
+  "n_crc": 50,
   "n_items": 500,
-  "healthy": 50,
-  "CRC": 50,
-  "outputs": [
-    "csv/samples.csv",
-    "csv/matrix_A.csv",
-    "csv/metadata.csv",
-    "csv/functional_matrix.csv",
-    "csv/item_profiles.csv",
-    "csv/item_mapping.csv",
-    "npy/matrix_A.npy",
-    "npy/labels.npy",
-    "npy/profiles_TSF.npy"
-  ],
-  "validation": {
-    "ok": true,
-    "errors": [],
-    "n_samples": 100,
-    "n_items": 500,
-    "healthy": 50,
-    "CRC": 50,
-    "A_shape": [
-      100,
-      500
-    ],
-    "labels_shape": [
-      100
-    ],
-    "profiles_TSF_shape": [
-      500,
-      3
-    ],
-    "row_sum_min": 0.9999998807907104,
-    "row_sum_max": 1.0000001192092896,
-    "zero_fraction": 0.36096,
-    "T_min": -0.9127846956253052,
-    "T_max": 1.0,
-    "S_min": 0.0,
-    "S_max": 1.0,
-    "F_min": 0.0,
-    "F_max": 1.0
-  },
-  "notes": [
-    "Dataset sintético compatible con el esquema del proyecto.",
-    "No corresponde a mediciones clínicas reales.",
-    "Para presentación final se recomienda reconstruir un dataset real desde curatedMetagenomicData."
-  ]
+  "abundance_type": "relative_abundance",
+  "T_formula": "abs(mean_crc_i - mean_healthy_i) / max_raw_T",
+  "S_formula": "mean normalized association between item abundance and usable metadata variables",
+  "F_formula": "mean of 5 functional markers",
+  "note": "Synthetic-compatible dataset for debugging and HPC benchmarks. Final presentation dataset should be reconstructed from curatedMetagenomicData."
 }

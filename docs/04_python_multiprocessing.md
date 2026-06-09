@@ -4,7 +4,7 @@ Ambos scripts comparten el módulo `python/common.py` que contiene:
 
 - `random_search(A, y, profiles, k, seed)`: random search vectorizado por batches de 8192 candidatos usando `rng.dirichlet` y multiplicación matricial.
 - `auc_matrix(scores, y)`: cálculo vectorizado de AUC para múltiples candidatos a la vez.
-- `load_data(data_dir)`: carga `matrix_A.npy`, `labels.npy` y `profiles.npy`.
+- `load_data(data_dir)`: carga `matrix_A.npy`, `labels.npy` y `profiles_TSF.npy`.
 
 ## Secuencial
 

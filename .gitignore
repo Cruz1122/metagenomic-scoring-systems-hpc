@@ -12,11 +12,11 @@ CUDA/scoring_cuda
 *.toc
 .DS_Store
 
-# Generated synthetic data (regenerate with: make data)
-data/npy/profiles.npy
-data/csv/labels.csv
-data/csv/profiles.csv
-data/metadata.json
+# Generated dataset (regenerate with: python data/scripts/generate_data.py)
+data/npy/*
+data/csv/*
+!data/csv/.gitkeep
+data/dataset_manifest.json
 
 # Generated results (regenerate with: make benchmark)
 results/benchmark.csv

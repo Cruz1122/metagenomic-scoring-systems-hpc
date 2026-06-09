@@ -10,7 +10,7 @@ DATA_DIR ?= data
 .PHONY: help data python-seq python-mp c openmp-run mpi-run cuda cuda-run pycuda-run benchmark plots clean
 
 help:
-	@echo "make data N_ITEMS=500 SEED=42"
+	@echo "make data                -> python data/scripts/generate_data.py"
 	@echo "make python-seq K=10000"
 	@echo "make python-mp K=10000 WORKERS=4"
 	@echo "make c | make openmp-run | make mpi-run"
@@ -18,8 +18,7 @@ help:
 	@echo "make benchmark | make plots | make clean"
 
 data:
-	python data/generate_synthetic_dataset.py --out-dir $(DATA_DIR) \
-		--n-samples 100 --n-items $(N_ITEMS) --seed $(SEED)
+	python data/scripts/generate_data.py --seed $(SEED)
 
 python-seq:
 	python python/sequential.py --k $(K) --seed $(SEED) --data-dir $(DATA_DIR)
@@ -55,4 +54,4 @@ clean:
 	$(MAKE) -C C_OpenMP_MPI clean || true
 	$(MAKE) -C CUDA clean || true
 	rm -f results/benchmark.csv results/benchmark_raw.csv results/plots/*.png
-	rm -f data/npy/matrix_A.npy data/npy/labels.npy data/npy/profiles.npy data/metadata.json
+	rm -rf data/npy/ data/csv/ data/dataset_manifest.json
