@@ -2,7 +2,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
+from typing import TYPE_CHECKING
 import numpy as np
+from sklearn.metrics import roc_auc_score
+
+if TYPE_CHECKING:
+    from logger import Log
 
 
 @dataclass(frozen=True)
@@ -28,28 +33,74 @@ class SearchResult:
         )
 
 
+def _load_npy(data_dir: Path, names: tuple[str, str, str]):
+    """Intenta cargar tres .npy desde data_dir. Retorna None si falta alguno."""
+    paths = [data_dir / n for n in names]
+    if all(p.exists() for p in paths):
+        return tuple(np.load(str(p)) for p in paths)
+    return None
+
+
 def load_data(data_dir: str | Path):
     """Carga matrices A, etiquetas y perfiles desde archivos .npy.
 
+    Busca en este orden:
+      1.  data_dir/npy/  con  matrix_A.npy, labels.npy, profiles_TSF.npy  (layout repo)
+      2.  data_dir/      con  matrix_A.npy, labels.npy, profiles.npy      (layout plano)
+
     Returns:
         tuple[np.ndarray, np.ndarray, np.ndarray]: (A, y, profiles)
+
+    Raises:
+        FileNotFoundError: si no encuentra los archivos.
+        ValueError: si las dimensiones no son coherentes.
     """
-    # TODO: implementar carga con validación de dimensiones
-    pass
+    data_dir = Path(data_dir)
 
+    # Estrategias de búsqueda ordenadas por prioridad
+    strategies = [
+        (data_dir / "npy", ("matrix_A.npy", "labels.npy", "profiles_TSF.npy")),
+        (data_dir,          ("matrix_A.npy", "labels.npy", "profiles.npy")),
+    ]
 
-def auc_matrix(scores: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """Calcula AUC por columna (para múltiples candidatos).
+    loaded = None
+    for base_dir, names in strategies:
+        loaded = _load_npy(base_dir, names)
+        if loaded is not None:
+            break
 
-    Args:
-        scores: (n_samples, n_candidates)
-        y: (n_samples,)  1=positivo, 0=negativo
+    if loaded is None:
+        raise FileNotFoundError(
+            f"No se encontraron archivos .npy en {data_dir}/npy/ ni en {data_dir}/ "
+            "(se busca: matrix_A.npy, labels.npy, profiles_TSF.npy o profiles.npy)"
+        )
 
-    Returns:
-        vector AUC por candidato
-    """
-    # TODO: implementar
-    pass
+    A, y, profiles = loaded
+
+    # --- Validación de dimensiones ---
+    if A.ndim != 2:
+        raise ValueError(f"A debe tener 2 dimensiones, tiene {A.ndim}")
+    if y.ndim != 1:
+        raise ValueError(f"y debe tener 1 dimensión, tiene {y.ndim}")
+    if profiles.ndim != 2:
+        raise ValueError(f"profiles debe tener 2 dimensiones, tiene {profiles.ndim}")
+    if profiles.shape[1] != 3:
+        raise ValueError(
+            f"profiles debe tener exactamente 3 columnas, tiene {profiles.shape[1]}"
+        )
+    if A.shape[1] != profiles.shape[0]:
+        raise ValueError(
+            f"columnas de A ({A.shape[1]}) != filas de profiles ({profiles.shape[0]})"
+        )
+    if A.shape[0] != y.shape[0]:
+        raise ValueError(
+            f"filas de A ({A.shape[0]}) != largo de y ({y.shape[0]})"
+        )
+    classes = set(np.unique(y))
+    if classes != {0, 1}:
+        raise ValueError(f"y debe contener clases 0 y 1, contiene {classes}")
+
+    return A, y, profiles
 
 
 def auc_vector(scores: np.ndarray, y: np.ndarray) -> float:
@@ -58,20 +109,47 @@ def auc_vector(scores: np.ndarray, y: np.ndarray) -> float:
     Args:
         scores: (n_samples,)
         y: (n_samples,)
+
+    Returns:
+        float: AUC
     """
-    # TODO: implementar
-    pass
+    return float(roc_auc_score(y, scores))
 
 
 def consistency(scores: np.ndarray, y: np.ndarray) -> float:
-    """Calcula el mejor promedio de sensibilidad + especificidad.
+    """Calcula el mejor balanced accuracy sobre todos los umbrales.
+
+    Barre todos los puntos de corte entre scores consecutivos y
+    retorna el máximo (TPR + TNR) / 2.
 
     Args:
         scores: (n_samples,)
         y: (n_samples,)
+
+    Returns:
+        float: mejor balanced accuracy
     """
-    # TODO: implementar
-    pass
+    order = np.argsort(scores)
+    y_sorted = y[order]
+    n_pos = int((y == 1).sum())
+    n_neg = int((y == 0).sum())
+
+    best = 0.0
+    # Empezamos con todos los positivos "por encima" del umbral mínimo
+    tp = int(y_sorted.sum())
+    tn = 0
+
+    for i in range(len(scores)):
+        tpr = tp / n_pos if n_pos > 0 else 1.0
+        tnr = tn / n_neg if n_neg > 0 else 1.0
+        best = max(best, (tpr + tnr) / 2.0)
+        # Mover el umbral: el sample i pasa al lado "negativo" (≤ umbral)
+        if y_sorted[i] == 1:
+            tp -= 1
+        else:
+            tn += 1
+
+    return float(best)
 
 
 def evaluate(A, y, profiles, w):
@@ -86,12 +164,23 @@ def evaluate(A, y, profiles, w):
     Returns:
         tuple[float, float]: (auc, consistency)
     """
-    # TODO: implementar
-    pass
+    P = profiles @ w
+    scores = A @ P
+    auc_val = auc_vector(scores, y)
+    cons_val = consistency(scores, y)
+    return auc_val, cons_val
 
 
-def random_search(A, y, profiles, k: int, seed: int, batch_size: int = 8192):
+def random_search(A, y, profiles, k: int, seed: int,
+                  log: Log | None = None):
     """Búsqueda aleatoria de pesos Dirichlet.
+
+    Itera K veces:
+      - W ~ Dirichlet(1,1,1)
+      - P = profiles @ W
+      - scores = A @ P
+      - AUC = auc(y, scores)
+      - guarda el mejor
 
     Args:
         A: (n_samples, n_items)
@@ -99,20 +188,65 @@ def random_search(A, y, profiles, k: int, seed: int, batch_size: int = 8192):
         profiles: (n_items, 3)
         k: número de candidatos a evaluar
         seed: semilla RNG
-        batch_size: lotes para evitar OOM
+        log: instancia Log opcional; si se pasa, reporta cada mejora
 
     Returns:
         tuple[float, float, tuple]: (best_auc, best_consistency, best_weights)
     """
-    # TODO: implementar
-    pass
+    rng = np.random.default_rng(seed)
+    best_auc = -np.inf
+    best_consistency = 0.0
+    best_w = None
+
+    for i in range(k):
+        w = rng.dirichlet(np.ones(3))
+        auc_val, cons_val = evaluate(A, y, profiles, w)
+        if auc_val > best_auc:
+            best_auc = auc_val
+            best_consistency = cons_val
+            best_w = w.copy()
+            if log is not None:
+                log.improvement(i, auc_val, cons_val, tuple(best_w))
+
+    return best_auc, best_consistency, tuple(best_w)
 
 
-def timed_search(name: str, p: int, A, y, profiles, k: int, seed: int) -> SearchResult:
+def timed_search(name: str, p: int, A, y, profiles, k: int, seed: int,
+                 log: Log | None = None) -> SearchResult:
     """Ejecuta random_search con medición de tiempo.
+
+    El cronómetro cubre solo la búsqueda (no la carga de datos).
+
+    Args:
+        name: etiqueta de implementación
+        p: unidades paralelas
+        A, y, profiles: datos
+        k: candidatos
+        seed: semilla
+        log: Log opcional para logging en vivo
 
     Returns:
         SearchResult con métricas y pesos.
     """
-    # TODO: implementar
-    pass
+    start = perf_counter()
+    best_auc, best_consistency, best_weights = random_search(
+        A, y, profiles, k, seed, log=log
+    )
+    elapsed = perf_counter() - start
+
+    result = SearchResult(
+        implementation=name,
+        parallel_units=p,
+        n_items=A.shape[1],
+        k=k,
+        time_sec=elapsed,
+        auc=best_auc,
+        consistency=best_consistency,
+        weights=best_weights,
+        seed=seed,
+    )
+
+    if log is not None:
+        log.complete(result)
+
+    return result
