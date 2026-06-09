@@ -61,6 +61,15 @@ class _Style:
 S = _Style()
 
 
+# ── Detectar soporte Unicode ─────────────────────────────────────────────────
+_SUPPORTS_UNICODE: bool = True
+try:
+    # Verificar si stdout puede imprimir caracteres Unicode
+    '╭─'.encode(sys.stdout.encoding or 'utf-8')
+except (UnicodeEncodeError, UnicodeDecodeError, LookupError):
+    _SUPPORTS_UNICODE = False
+
+
 # ── Logger ──────────────────────────────────────────────────────────────────
 class Log:
     """Logger contextual que imprime hits de AUC con color.
@@ -88,13 +97,17 @@ class Log:
 
     def _header(self) -> None:
         """Header de inicio: implementación, N, K."""
-        sep = '─' * 58
+        if _SUPPORTS_UNICODE:
+            tl, tr, bl, br, h, v = '╭', '╮', '╰', '╯', '─', '│'
+        else:
+            tl, tr, bl, br, h, v = '+', '+', '+', '+', '-', '|'
+        sep = h * 58
         print()
-        print(S.bold(S.cyan(f'  ╭─ {self.impl} ' + '─' * max(2, 48 - len(self.impl)) + '╮')))
-        print(S.cyan(f'  │  {S.bold("BÚSQUEDA DE PESOS ÓPTIMOS")}'))
-        print(S.cyan(f'  │  items (N) … {self.n_items}'))
-        print(S.cyan(f'  │  candidatos   {self.k}'))
-        print(S.cyan(f'  ╰' + '─' * 56 + '╯'))
+        print(S.bold(S.cyan(f'  {tl}{h} {self.impl} ' + h * max(2, 48 - len(self.impl)) + f'{tr}')))
+        print(S.cyan(f'  {v}  {S.bold("BÚSQUEDA DE PESOS ÓPTIMOS")}'))
+        print(S.cyan(f'  {v}  items (N) ... {self.n_items}'))
+        print(S.cyan(f'  {v}  candidatos   {self.k}'))
+        print(S.cyan(f'  {bl}' + h * 56 + f'{br}'))
         print()
 
     def _improvement_line(self, iteration: int, auc: float, prev_auc: float,
@@ -102,11 +115,16 @@ class Log:
         """Imprime una línea de mejora."""
         self._count += 1
         w1, w2, w3 = weights
-        delta = auc - prev_auc
+        if self._count == 1:
+            delta_str = "initial"
+        else:
+            delta = auc - prev_auc
+            delta_str = f"+{delta:.6f}"
+        arrow = '->' if not _SUPPORTS_UNICODE else '\u279c'
         line = (
-            f'  {S.gold("➜")}  '
+            f'  {S.gold(arrow)}  '
             f'{S.bold(f"AUC {auc:.6f}")}  '
-            f'{S.green(f"(+{delta:+.6f})")}  '
+            f'{S.green(f"({delta_str})")}  '
             f'iter {iteration:,}/{self.k:,}  '
             f'consist={consistency:.4f}  '
             f'w=[{w1:.4f} {w2:.4f} {w3:.4f}]'
@@ -116,17 +134,22 @@ class Log:
     def _summary(self, result: 'SearchResult') -> None:
         """Resumen final con recuadro."""
         w1, w2, w3 = result.weights
-        sep = '─' * 58
+        if _SUPPORTS_UNICODE:
+            tl, tr, bl, br, h, v = '╭', '╮', '╰', '╯', '─', '│'
+        else:
+            tl, tr, bl, br, h, v = '+', '+', '+', '+', '-', '|'
+        sep = h * 58
         print()
-        print(S.bold(S.magenta(f'  ╭─ MEJOR RESULTADO ' + '─' * max(2, 40 - len(str(self._count))) + '╮')))
-        print(S.magenta(f'  │  {S.bold("implementación")} … {result.implementation}'))
-        print(S.magenta(f'  │  {S.bold("mejoras")}        … {self._count}'))
-        print(S.magenta(f'  │  {S.bold("AUC")}            … {S.gold(f"{result.auc:.9f}")}'))
-        print(S.magenta(f'  │  {S.bold("consistencia")}   … {result.consistency:.4f}'))
-        print(S.magenta(f'  │  {S.bold("pesos W")}        … [{w1:.9f}, {w2:.9f}, {w3:.9f}]'))
-        print(S.magenta(f'  │  {S.bold("suma W")}         … {w1 + w2 + w3:.9f}'))
-        print(S.magenta(f'  │  {S.bold("tiempo")}         … {S.cyan(f"{result.time_sec:.6f} s")}'))
-        print(S.magenta(f'  ╰' + '─' * 56 + '╯'))
+        print(S.bold(S.magenta(f'  {tl}{h} MEJOR RESULTADO ' + h * max(2, 40 - len(str(self._count))) + f'{tr}')))
+        ell = '...' if not _SUPPORTS_UNICODE else '...'
+        print(S.bold(S.magenta(f'  {v}  {S.bold("implementacion")} {ell} {result.implementation}')))
+        print(S.magenta(f'  {v}  {S.bold("mejoras")}        {ell} {self._count}'))
+        print(S.magenta(f'  {v}  {S.bold("AUC")}            {ell} {S.gold(f"{result.auc:.9f}")}'))
+        print(S.magenta(f'  {v}  {S.bold("consistencia")}   {ell} {result.consistency:.4f}'))
+        print(S.magenta(f'  {v}  {S.bold("pesos W")}        {ell} [{w1:.9f}, {w2:.9f}, {w3:.9f}]'))
+        print(S.magenta(f'  {v}  {S.bold("suma W")}         {ell} {w1 + w2 + w3:.9f}'))
+        print(S.magenta(f'  {v}  {S.bold("tiempo")}         {ell} {S.cyan(f"{result.time_sec:.6f} s")}'))
+        print(S.magenta(f'  {bl}' + h * 56 + f'{br}'))
         print()
 
     # ── API pública ─────────────────────────────────────────────────────
