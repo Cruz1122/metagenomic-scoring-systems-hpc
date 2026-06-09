@@ -18,10 +18,16 @@ mkdir -p results results/plots
 python data/scripts/generate_data.py --seed "$SEED"
 
 # 2. Benchmark header
-echo "implementation,parallel_units,n_items,k,time_sec,auc,consistency,w1,w2,w3,seed" > "$RAW"
+echo "implementation,parallel_units,n_items,k,time_sec,auc,consistency,w1,w2,w3,seed,search_mode,iterations_until_best" > "$RAW"
 
-# 3. Python secuencial
-python python/sequential.py --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --csv >> "$RAW"
+# 3. Python secuencial — random baseline
+python python/sequential.py --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --search random --csv >> "$RAW"
+
+# 3b. Python secuencial — grid search
+python python/sequential.py --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --search grid --csv >> "$RAW"
+
+# 3c. Python secuencial — hybrid search
+python python/sequential.py --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --search hybrid --csv >> "$RAW"
 
 # 4. Python multi-core
 for W in $WORKERS_LIST; do

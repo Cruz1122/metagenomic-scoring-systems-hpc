@@ -21,7 +21,13 @@ data:
 	python data/scripts/generate_data.py --seed $(SEED)
 
 python-seq:
-	python python/sequential.py --k $(K) --seed $(SEED) --data-dir $(DATA_DIR)
+	python python/sequential.py --k $(K) --seed $(SEED) --data-dir $(DATA_DIR) --search random
+
+python-seq-grid:
+	python python/sequential.py --k $(K) --seed $(SEED) --data-dir $(DATA_DIR) --search grid
+
+python-seq-hybrid:
+	python python/sequential.py --k $(K) --seed $(SEED) --data-dir $(DATA_DIR) --search hybrid
 
 python-mp:
 	python python/multicore.py --k $(K) --seed $(SEED) --workers $(WORKERS) --data-dir $(DATA_DIR)

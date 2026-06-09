@@ -20,6 +20,7 @@ def worker(payload):
         tuple[float, float, tuple]: (auc, consistency, weights)
     """
     # TODO: cargar datos localmente y ejecutar random_search
+    # Nota: random_search ahora retorna 4-tuple (auc, consistency, weights, best_iter)
     raise NotImplementedError('Implementar worker')
 
 

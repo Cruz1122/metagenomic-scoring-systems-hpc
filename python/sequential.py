@@ -12,6 +12,8 @@ def main():
     ap = argparse.ArgumentParser(description='Scoring metagenómico — versión secuencial')
     ap.add_argument('--k', type=int, default=10000, help='Número de candidatos')
     ap.add_argument('--seed', type=int, default=42, help='Semilla RNG')
+    ap.add_argument('--search', choices=['random', 'grid', 'hybrid'],
+                    default='random', help='Estrategia de búsqueda')
     ap.add_argument('--data-dir', type=Path, default=Path('data'), help='Directorio de datos')
     ap.add_argument('--csv', action='store_true', help='Salida en CSV (formato benchmark)')
     args = ap.parse_args()
@@ -23,7 +25,8 @@ def main():
     log = None if args.csv else Log('python_sequential', A.shape[1], args.k)
 
     # Búsqueda con tiempo (solo el núcleo computacional)
-    result = timed_search('python_sequential', 1, A, y, profiles, args.k, args.seed, log=log)
+    result = timed_search('python_sequential', 1, A, y, profiles, args.k, args.seed,
+                          log=log, search_mode=args.search)
 
     # --- Salida ---
     if args.csv:
