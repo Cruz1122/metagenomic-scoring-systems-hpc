@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Logger colorido para búsqueda de scoring metagenómico.
 
 Arquitectura:
@@ -111,7 +110,8 @@ class Log:
         print()
 
     def _improvement_line(self, iteration: int, auc: float, prev_auc: float,
-                          consistency: float, weights: tuple) -> None:
+                          consistency: float, weights: tuple,
+                          worker_id: int | None = None) -> None:
         """Imprime una línea de mejora."""
         self._count += 1
         w1, w2, w3 = weights
@@ -121,9 +121,10 @@ class Log:
             delta = auc - prev_auc
             delta_str = f"+{delta:.6f}"
         arrow = '->' if not _SUPPORTS_UNICODE else '\u279c'
+        tag = f'[W{worker_id}] ' if worker_id is not None else ''
         line = (
             f'  {S.gold(arrow)}  '
-            f'{S.bold(f"AUC {auc:.6f}")}  '
+            f'{S.bold(f"{tag}AUC {auc:.6f}")}  '
             f'{S.green(f"({delta_str})")}  '
             f'iter {iteration:,}/{self.k:,}  '
             f'consist={consistency:.4f}  '
@@ -154,20 +155,47 @@ class Log:
 
     # ── API pública ─────────────────────────────────────────────────────
 
+    def worker_report(self, worker_id: int, auc: float,
+                      consistency: float, weights: tuple,
+                      chunk_size: int, is_best: bool = False) -> None:
+        """Reporta el mejor local encontrado por un worker.
+
+        Args:
+            worker_id:  ID del worker (0-indexed)
+            auc:        AUC del mejor local del worker
+            consistency: consistencia asociada
+            weights:    tupla (w1, w2, w3)
+            chunk_size: cantidad de candidatos evaluados en el chunk
+            is_best:    True si este worker tiene el mejor global
+        """
+        w1, w2, w3 = weights
+        marker = S.gold(' ★') if is_best else ''
+        line = (
+            f'  {S.dim(S.cyan(f"[W{worker_id}]"))}  '
+            f'{S.bold(f"AUC {auc:.6f}")}  '
+            f'consist={consistency:.4f}  '
+            f'w=[{w1:.4f} {w2:.4f} {w3:.4f}]  '
+            f'({chunk_size} cand.){marker}'
+        )
+        print(line)
+
     def improvement(self, iteration: int, auc: float,
-                    consistency: float, weights: tuple) -> None:
+                    consistency: float, weights: tuple,
+                    worker_id: int | None = None) -> None:
         """Llama en cada vez que se supera el mejor AUC.
 
         Args:
-            iteration: iteración actual (0-indexed)
-            auc:       nuevo mejor AUC
+            iteration:  iteración actual (0-indexed)
+            auc:        nuevo mejor AUC
             consistency: consistencia asociada
-            weights:   tupla (w1, w2, w3)
+            weights:    tupla (w1, w2, w3)
+            worker_id:  ID del worker que encontró la mejora (solo multi-core)
         """
         prev = self.best_auc
         self.best_auc = auc
         self.best_iter = iteration
-        self._improvement_line(iteration, auc, prev, consistency, weights)
+        self._improvement_line(iteration, auc, prev, consistency, weights,
+                               worker_id=worker_id)
 
     def complete(self, result: 'SearchResult') -> None:
         """Imprime resumen final.
