@@ -44,8 +44,11 @@ python-mp-hybrid:
 c:
 	$(MAKE) -C C_OpenMP_MPI all
 
+seq-run: c
+	./C_OpenMP_MPI/scoring_sequential --k $(K) --seed $(SEED) --data-dir $(DATA_DIR)
+
 openmp-run: c
-	./C_OpenMP_MPI/scoring_openmp --k $(K) --seed $(SEED) --threads $(THREADS) --data-dir $(DATA_DIR)
+	./C_OpenMP_MPI/scoring_openmp --k $(K) --seed $(SEED) --data-dir $(DATA_DIR)
 
 mpi-run: c
 	mpirun -np $(MPI_RANKS) ./C_OpenMP_MPI/scoring_mpi --k $(K) --seed $(SEED) --data-dir $(DATA_DIR)
