@@ -2,35 +2,38 @@
 
 MPI se usa para memoria distribuida. Cada rank evalúa un bloque de candidatos.
 
-Archivo:
+Archivo: `C_OpenMP_MPI/scoring_mpi.c`
 
-```text
-C_OpenMP_MPI/scoring_mpi.c
-```
+**Estado: scaffold.** El archivo incluye `shared/common.h`, `shared/rng.h`, `shared/logger.h` (reemplazando los stubs locales anteriores). Falta implementar la lógica MPI real.
 
-Compilar y ejecutar:
+## Compilar
 
 ```bash
 make -C C_OpenMP_MPI scoring_mpi
-mpirun -np 4 ./C_OpenMP_MPI/scoring_mpi --k 100000 --seed 42 --data-dir data
+mpirun -np 4 ./C_OpenMP_MPI/scoring_mpi --k 10000 --seed 42 --data-dir data
 ```
 
-Estrategia:
+Requiere MPICH, OpenMPI o equivalente.
 
-1. **Rank 0** genera todos los candidatos usando Xorshift y los almacena en `all[]`.
-2. `MPI_Barrier` sincroniza antes de comenzar la medición de tiempo.
-3. `MPI_Scatter` reparte `chunk = ceil(K/size)` candidatos a cada rank (broadcast de W).
-4. Cada rank evalúa su bloque de forma completamente independiente.
-5. `MPI_Reduce` con `MPI_MAXLOC` identifica el rank que tiene el mejor AUC (operación de par `{value, rank}`).
-6. `MPI_Gather` recolecta los 5 valores `[auc, cons, w1, w2, w3]` de todos los ranks.
-7. Rank 0 imprime la línea CSV tomando los pesos del rank ganador.
+## Pipeline sugerido
 
-## Detalles técnicos
+1. **Rank 0** carga datos con `load_data(data_dir, &ds)` (shared/common.c).
+2. **Broadcast** dimensiones (`n_samples`, `n_items`) y matrices (`A`, `profiles`, `y`) a todos los ranks.
+3. Cada rank: RNG propio `pcg64_seed(pcg, seed + rank)`, itera su chunk de `K/size` candidatos.
+4. `MPI_Gather` o `MPI_Reduce` de mejores locales → rank 0.
+5. Rank 0: `log_complete()`, salida parseable.
 
-- El tiempo se mide con `MPI_Wtime()` después del barrier, antes del scatter. Esto aísla el cómputo paralelo de la generación y distribución.
-- Todos los ranks cargan los datos completos de CSV (cada rank tiene copia propia de `A`, `profiles`, `y`). Esto es necesario porque cada rank evalúa candidatos.
-- Los candidatos extras (cuando `chunk * size > K`) se generan pero se ignoran en la evaluación.
+## Recursos compartidos disponibles
+
+| Función | Archivo | Propósito |
+|---|---|---|
+| `load_data()` | `shared/common.h` | Carga CSV → Dataset |
+| `evaluate()` | `shared/common.h` | scores = A @ (profiles @ w), AUC, consistency |
+| `simplex()` | `shared/rng.h` | Dirichlet(1,1,1) |
+| `pcg64_seed()` | `shared/rng.h` | Inicializar RNG con semilla |
+| `log_header/completer()` | `shared/logger.h` | Logger colorido |
+| `free_dataset()` | `shared/common.h` | Liberar Dataset |
 
 ## Advertencia
 
-MPI puede no acelerar con `K` pequeño o en una sola máquina. Eso no invalida MPI; invalida el experimento. MPI brilla en clústeres con alta latencia de red pero muchos nodos, donde `K` es suficientemente grande para que el cómputo domine sobre la comunicación.
+MPI puede no acelerar con `K` pequeño o en una sola máquina. MPI brilla en clústeres con alta latencia de red pero muchos nodos, donde `K` es suficientemente grande para que el cómputo domine sobre la comunicación.

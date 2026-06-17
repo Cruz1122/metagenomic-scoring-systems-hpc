@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-"""Implementación secuencial (single-core) de búsqueda de pesos."""
 from __future__ import annotations
 import argparse
 from pathlib import Path

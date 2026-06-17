@@ -138,10 +138,14 @@ $$
 **Flujo:**
 
 1. Cargar $A$ e $y$.
-2. Muestrear $K$ vectores $W$ sobre el simplex.
+2. Muestrear $K$ vectores $W$ sobre el simplex con `rng.dirichlet`.
 3. Para cada $W$: calcular $P \rightarrow \text{Score} = AP \rightarrow \text{AUC}$.
 4. Retornar $W^* = \arg\max \text{AUC}$.
-5. Versión multicore: repartir los $K$ candidatos entre procesos usando `cpu_count()`.
+5. Versión multicore: generar los $K$ pesos **una vez** en el proceso principal,
+   dividir en chunks con `np.array_split`, y evaluar cada chunk con
+   `Pool.map(partial(_eval_chunk, A, y, profiles), chunks)`. Cada worker
+   retorna su mejor local; el proceso principal selecciona el mejor global.
+   Sin variables compartidas ni sincronización explícita.
 
 ### 3.2. Nivel 2 — C con OpenMP y MPI
 
@@ -232,7 +236,7 @@ scoring_metagenomico/
 │   ├── __init__.py
 │   ├── common.py                → [SCAFFOLD] métricas y búsqueda
 │   ├── sequential.py            → [SCAFFOLD] baseline
-│   └── multicore.py             → [SCAFFOLD] multiprocessing
+│   └── multicore.py             → [IMPLEMENTADO] multiprocessing con Pool.map
 ├── C_OpenMP_MPI/
 │   ├── scoring_openmp.c         → [SCAFFOLD] OpenMP
 │   ├── scoring_mpi.c            → [SCAFFOLD] MPI

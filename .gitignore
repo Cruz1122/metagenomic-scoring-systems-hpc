@@ -4,6 +4,7 @@ __pycache__/
 *.o
 *.so
 *.out
+C_OpenMP_MPI/scoring_sequential
 C_OpenMP_MPI/scoring_openmp
 C_OpenMP_MPI/scoring_mpi
 CUDA/scoring_cuda
@@ -11,6 +12,12 @@ CUDA/scoring_cuda
 *.log
 *.toc
 .DS_Store
+
+# IDE / LSP config (generated, not committed)
+.vscode/
+compile_commands.json
+.clangd
+compile_flags.txt
 
 # Generated dataset (regenerate with: python data/scripts/generate_data.py)
 data/npy/*

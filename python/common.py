@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score  # pyright: ignore[reportMissingImports]
 
 
 @dataclass(frozen=True)

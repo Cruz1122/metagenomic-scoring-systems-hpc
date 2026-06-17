@@ -15,7 +15,7 @@
 Toda implementación imprime:
 
 ```text
-implementation,parallel_units,n_items,k,time_sec,auc,consistency,w1,w2,w3,seed
+implementation,parallel_units,n_items,k,time_sec,auc,consistency,w1,w2,w3,seed,search_mode,iterations_until_best
 ```
 
 `postprocess_benchmark.py` agrega:

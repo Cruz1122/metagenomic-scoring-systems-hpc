@@ -29,9 +29,19 @@ python python/sequential.py --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --sea
 # 3c. Python secuencial — hybrid search
 python python/sequential.py --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --search hybrid --csv >> "$RAW"
 
-# 4. Python multi-core
+# 4. Python multi-core — random search
 for W in $WORKERS_LIST; do
   python python/multicore.py --k "$K" --seed "$SEED" --workers "$W" --data-dir "$DATA_DIR" --csv >> "$RAW"
+done
+
+# 4b. Python multi-core — grid search
+for W in $WORKERS_LIST; do
+  python python/multicore.py --k "$K" --seed "$SEED" --workers "$W" --data-dir "$DATA_DIR" --search grid --csv >> "$RAW"
+done
+
+# 4c. Python multi-core — hybrid search
+for W in $WORKERS_LIST; do
+  python python/multicore.py --k "$K" --seed "$SEED" --workers "$W" --data-dir "$DATA_DIR" --search hybrid --csv >> "$RAW"
 done
 
 # 5. C OpenMP

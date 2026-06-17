@@ -24,10 +24,16 @@ results/benchmark_raw.csv   → datos crudos por implementación
 results/benchmark.csv        → incluye speedup y eficiencia
 ```
 
-Columnas de `benchmark.csv`:
+Columnas de `benchmark_raw.csv`:
 
 ```text
-implementation, parallel_units, n_items, k, time_sec, auc, consistency, w1, w2, w3, seed, speedup, efficiency
+implementation, parallel_units, n_items, k, time_sec, auc, consistency, w1, w2, w3, seed, search_mode, iterations_until_best
+```
+
+Columnas de `benchmark.csv` (tras post-procesamiento):
+
+```text
+implementation, parallel_units, n_items, k, time_sec, auc, consistency, w1, w2, w3, seed, search_mode, iterations_until_best, speedup, efficiency
 ```
 
 Donde:
