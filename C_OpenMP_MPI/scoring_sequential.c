@@ -102,7 +102,7 @@ static Best random_search(const Dataset *ds, long k, uint64_t seed) {
             best.w[1] = w[1];
             best.w[2] = w[2];
             best.iter = i;
-            log_improvement(i, k, auc_val, prev, cons_val, w);
+            log_improvement(i, k, auc_val, prev, cons_val, w, -1);
         }
     }
 
@@ -126,7 +126,7 @@ static Best random_search(const Dataset *ds, long k, uint64_t seed) {
 int main(int argc, char **argv) {
     long K         = atol(arg(argc, argv, "--k",         "10000"));
     int  seed      = atoi(arg(argc, argv, "--seed",      "42"));
-    const char *data_dir = arg(argc, argv, "--data-dir", "data");
+    const char *data_dir = parse_data_dir(argc, argv);
 
     /* Cargar datos (solo CSV) */
     Dataset ds;

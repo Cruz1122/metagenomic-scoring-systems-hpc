@@ -275,6 +275,8 @@ static double* load_csv_profiles(const char *path, int *rows, int *cols) {
  */
 int load_data(const char *data_dir, Dataset *ds) {
     char pA[512], pY[512], pP[512];
+    fprintf(stderr, "  cargando CSV desde %s/csv/ ...\n", data_dir);
+    fflush(stderr);
     snprintf(pA, sizeof(pA), "%s/csv/matrix_A.csv", data_dir);
     snprintf(pY, sizeof(pY), "%s/csv/samples.csv", data_dir);
     snprintf(pP, sizeof(pP), "%s/csv/item_profiles.csv", data_dir);
@@ -314,6 +316,31 @@ int load_data(const char *data_dir, Dataset *ds) {
     ds->A = A; ds->n_samples = rA; ds->n_items = cA;
     ds->profiles = P; ds->y = y;
     return 0;
+}
+
+static const char *cli_arg(int argc, char **argv,
+                           const char *name, const char *fallback) {
+    for (int i = 1; i < argc - 1; i++)
+        if (strcmp(argv[i], name) == 0)
+            return argv[i + 1];
+    return fallback;
+}
+
+const char *parse_data_dir(int argc, char **argv) {
+    const char *v = cli_arg(argc, argv, "--data-dir", NULL);
+    if (!v) v = cli_arg(argc, argv, "--data", NULL);
+    if (!v) return "data/processed/synthetic_CRC2000x500_balanced";
+    /* quitar slash final para evitar data/foo//csv/ */
+    static char buf[512];
+    size_t n = strlen(v);
+    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+    memcpy(buf, v, n);
+    buf[n] = '\0';
+    while (n > 1 && buf[n - 1] == '/') {
+        buf[n - 1] = '\0';
+        n--;
+    }
+    return buf;
 }
 
 void free_dataset(Dataset *ds) {

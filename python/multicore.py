@@ -215,6 +215,7 @@ def _sample_local_dirichlet(best_w, n: int, rng,
 
 
 def hybrid_search(A, y, profiles, k: int, seed: int,
+                  step: float = 0.02,
                   workers: int = 1, pool: Pool | None = None,
                   log: Log | None = None):
     """Búsqueda híbrida en tres fases: grid + random + local — multi-core.
@@ -245,7 +246,7 @@ def hybrid_search(A, y, profiles, k: int, seed: int,
 
     # ── Fase 1: Grid grueso ────────────────────────────────────────────
     best_auc, best_consistency, best_w, best_iter, iteration = grid_search(
-        A, y, profiles, workers=workers, pool=pool, log=log
+        A, y, profiles, step=step, workers=workers, pool=pool, log=log
     )
 
     remaining = k - iteration
@@ -327,7 +328,8 @@ def hybrid_search(A, y, profiles, k: int, seed: int,
 
 def timed_search(name: str, p: int, A, y, profiles, k: int, seed: int,
                  log: Log | None = None,
-                 search_mode: str = 'random') -> SearchResult:
+                 search_mode: str = 'random',
+                 step: float = 0.02) -> SearchResult:
     """Ejecuta búsqueda de pesos con medición de tiempo — multi-core.
 
     Crea un Pool de `p` workers y lo inyecta en las funciones de búsqueda.
@@ -351,11 +353,12 @@ def timed_search(name: str, p: int, A, y, profiles, k: int, seed: int,
 
         if search_mode == 'grid':
             best_auc, best_consistency, best_weights, best_iter, actual_k = \
-                grid_search(A, y, profiles, workers=p, pool=pool, log=log)
+                grid_search(A, y, profiles, step=step, workers=p, pool=pool, log=log)
             k = actual_k
         elif search_mode == 'hybrid':
             best_auc, best_consistency, best_weights, best_iter = \
-                hybrid_search(A, y, profiles, k, seed, workers=p, pool=pool, log=log)
+                hybrid_search(A, y, profiles, k, seed, step=step,
+                              workers=p, pool=pool, log=log)
         else:  # 'random'
             best_auc, best_consistency, best_weights, best_iter = \
                 random_search(A, y, profiles, k, seed, workers=p, pool=pool, log=log)
@@ -389,6 +392,8 @@ def main():
     ap.add_argument('--seed', type=int, default=42, help='Semilla RNG')
     ap.add_argument('--search', choices=['random', 'grid', 'hybrid'],
                     default='random', help='Estrategia de búsqueda')
+    ap.add_argument('--step', type=float, default=0.02,
+                    help='Paso del grid (default 0.02)')
     ap.add_argument('--workers', type=int, default=max(1, os.cpu_count() or 1),
                     help='Número de procesos workers')
     ap.add_argument('--theta', type=float, default=None,
@@ -405,7 +410,8 @@ def main():
 
     # Búsqueda con Pool
     result = timed_search('python_multicore', args.workers, A, y, profiles,
-                          args.k, args.seed, log=log, search_mode=args.search)
+                          args.k, args.seed, log=log, search_mode=args.search,
+                          step=args.step)
 
     # --- Consistencia con theta (validación post-hoc) ---
     w = np.array(result.weights)

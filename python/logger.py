@@ -122,11 +122,12 @@ class Log:
             delta_str = f"+{delta:.6f}"
         arrow = '->' if not _SUPPORTS_UNICODE else '\u279c'
         tag = f'[W{worker_id}] ' if worker_id is not None else ''
+        pct = 100.0 * (iteration + 1) / self.k if self.k > 0 else 0.0
         line = (
             f'  {S.gold(arrow)}  '
             f'{S.bold(f"{tag}AUC {auc:.6f}")}  '
             f'{S.green(f"({delta_str})")}  '
-            f'iter {iteration:,}/{self.k:,}  '
+            f'iter {iteration:,}/{self.k:,} ({pct:.1f}%)  '
             f'consist={consistency:.4f}  '
             f'w=[{w1:.4f} {w2:.4f} {w3:.4f}]'
         )
