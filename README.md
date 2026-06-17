@@ -55,8 +55,8 @@ scoring_metagenomico/
 │   ├── sequential.py           → [SCAFFOLD] baseline secuencial
 │   └── multicore.py            → [SCAFFOLD] multiprocessing
 ├── C_OpenMP_MPI/
-│   ├── scoring_openmp.c        → [SCAFFOLD] OpenMP: helpers + TODO
-│   ├── scoring_mpi.c           → [SCAFFOLD] MPI: helpers + TODO
+│   ├── scoring_openmp.c        → OpenMP: random + grid + hybrid (3 estrategias)
+│   ├── scoring_mpi.c           → [SCAFFOLD] MPI: reusa shared/
 │   └── Makefile                → compilación gcc / mpicc
 ├── CUDA/
 │   ├── scoring_kernel.cu       → [SCAFFOLD] kernel CUDA + TODO
@@ -117,14 +117,12 @@ make python-mp K=10000 WORKERS=4  # multicore
 
 ```bash
 make c                          # compila ambos
-make openmp-run K=100000 THREADS=4
+OMP_NUM_THREADS=4 ./C_OpenMP_MPI/scoring_openmp --k 100000 --seed 42 --data-dir data
 ```
 
 ### 4. C/MPI
 
 ```bash
-make mpi-run K=100000 MPI_RANKS=4
-# o paso a paso:
 make -C C_OpenMP_MPI scoring_mpi
 mpirun -np 4 ./C_OpenMP_MPI/scoring_mpi --k 100000 --seed 42 --data-dir data
 ```
@@ -165,7 +163,7 @@ implementation,parallel_units,n_items,k,time_sec,auc,consistency,w1,w2,w3,seed
 | `k` | Candidatos evaluados |
 | `time_sec` | Tiempo de búsqueda (excluye carga de datos) |
 | `auc` | AUC del mejor W encontrado |
-| `consistency` | Balanced accuracy máxima (pendiente de implementar en scaffold) |
+| `consistency` | Balanced accuracy máxima |
 | `w1..w3` | Pesos del mejor candidato |
 | `seed` | Semilla de reproducibilidad |
 
@@ -176,11 +174,11 @@ El postprocesado (`scripts/postprocess_benchmark.py`) agrega `speedup = T_seq / 
 ## Estrategia de paralelización
 
 | Implementación | Paradigma | División de trabajo | RNG | Sincronización |
-|---|---|---|---|---|
+|---|---|---|---|---|---|
 | Python secuencial | — | batches vectorizados (8192) | `numpy.random.default_rng` | — |
 | Python multicore | Multiprocessing | `K / workers`, seed offset 100003 | `numpy.random.default_rng` por worker | `Pool.map` |
-| C/OpenMP | Memoria compartida | `schedule(static)` sobre for loop | Xorshift por hilo | `#pragma omp critical` para mejor global |
-| C/MPI | Memoria distribuida | `chunk = ceil(K/size)`, scatter | Xorshift en rank 0 | `MPI_Reduce(MPI_MAXLOC)` + `MPI_Gather` |
+| C/OpenMP | Memoria compartida | `schedule(static)` sobre for loop | PCG64 por hilo (`seed + tid`) | Merge local→global post-loop vía `#pragma omp critical` |
+| C/MPI | Memoria distribuida | `chunk = ceil(K/size)` por rank | PCG64 por rank (`seed + rank`) | `MPI_Gather` / `MPI_Reduce` (scaffold) |
 | CUDA C | GPU masivo | 1 hilo = 1 candidato, grid `<K+255)/256,256>` | `mt19937_64` en host | Reducción en host (`std::max_element`) |
 | PyCUDA | GPU (float32) | 1 hilo = 1 candidato, grid `<K+255)/256,256>` | `numpy.random.default_rng` | AUC calculado en host |
 
@@ -219,7 +217,7 @@ make clean
 | `docs/03_datos_y_seed.md` | Datos sintéticos, señal y reproducibilidad |
 | `docs/04_python_multiprocessing.md` | Python secuencial y multiprocessing |
 | `docs/05_openmp.md` | OpenMP: RNG, patrón, métricas |
-| `docs/06_mpi.md` | MPI: scatter, reduce, gather |
+| `docs/06_mpi.md` | MPI: scaffold, reusa shared/ |
 | `docs/07_cuda.md` | CUDA C y PyCUDA |
 | `docs/08_benchmarks.md` | Pipeline de benchmark |
 | `docs/09_amdahl_gustafson.md` | Amdahl y escalabilidad débil |
@@ -241,4 +239,4 @@ El contrato define perfiles `T_i`, `S_i`, `F_i` en `item_profiles.csv` y `profil
 - **No compares tiempos entre implementaciones si cambiaste N, K, seed o dataset.**
 - **No optimices código que no reproduce el AUC** — si la búsqueda no encuentra el máximo, la optimización de tiempo es irrelevante.
 - **MPI en una sola máquina mide overhead**, no escalabilidad real.
-- **Todas las implementaciones están en [SCAFFOLD]** — funciones con docstring y `TODO`, cuerpos vacíos. Implementar según la especificación en `docs/`.
+- **`C/OpenMP` implementado** (3 estrategias: random, grid, hybrid). `C/MPI`, `CUDA`, `scripts/` y `python/` son scaffold con TODO pendiente.

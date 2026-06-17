@@ -26,6 +26,11 @@
 #include "ziggurat.h"
 #include <math.h>
 
+/* M_PI no es estándar C11; definir por si acaso */
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 /* ================================================================== */
 /*  SeedSequence                                                       */
 /* ================================================================== */
@@ -158,4 +163,86 @@ void simplex(uint64_t *s, double w[3]) {
     w[0] = a / sum;
     w[1] = b / sum;
     w[2] = c / sum;
+}
+
+/* ================================================================== */
+/*  Box-Muller: genera ~ N(0,1) interno                                */
+/* ================================================================== */
+
+static double box_muller(uint64_t *pcg) {
+    double u1 = u01(pcg);
+    /* evitar log(0) */
+    while (u1 == 0.0) u1 = u01(pcg);
+    double u2 = u01(pcg);
+    return sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+}
+
+/* ================================================================== */
+/*  Gamma(alpha, 1) — Marsaglia-Tsang (alpha >= 1)                    */
+/*  Fuente: https://dl.acm.org/doi/10.1145/358407.358414              */
+/* ================================================================== */
+
+static double gamma_mt(double alpha, uint64_t *pcg) {
+    double d = alpha - (1.0 / 3.0);
+    double c = 1.0 / sqrt(9.0 * d);
+    for (;;) {
+        double x = box_muller(pcg);
+        double v = 1.0 + c * x;
+        v = v * v * v;   /* (1 + c*x)^3 */
+        if (v <= 0.0) continue;
+        double u = u01(pcg);
+        /* Rango de aceptación rápido (~99% de los casos) */
+        if (u < 1.0 - 0.0331 * (x * x) * (x * x))
+            return d * v;
+        if (log(u) < 0.5 * x * x + d * (1.0 - v + log(v)))
+            return d * v;
+    }
+}
+
+/* ================================================================== */
+/*  Gamma(alpha, 1) — Best (1983) para 0 < alpha < 1                  */
+/*  Fuente: https://dl.acm.org/doi/10.2307/2347345                    */
+/* ================================================================== */
+
+static double gamma_small(double alpha, uint64_t *pcg) {
+    double e = 2.71828182845904523536; /* exp(1) */
+    double threshold = e / (e + alpha);
+    for (;;) {
+        double u = u01(pcg);
+        double v = u01(pcg);
+        if (u <= threshold) {
+            /* Region 1: z = (v * alpha)^(1/alpha), z in (0, 1] */
+            double z = pow(v * alpha, 1.0 / alpha);
+            if (z <= 1.0) return z;
+        } else {
+            /* Region 2: z = 1 - log(v), z > 1 */
+            double z = 1.0 - log(v);
+            if (u <= pow(z, alpha - 1.0)) return z;
+        }
+    }
+}
+
+/* ================================================================== */
+/*  Gamma(alpha, 1) — API pública                                      */
+/* ================================================================== */
+
+double gamma_sample(double alpha, uint64_t *pcg) {
+    if (alpha <= 0.0) return 0.0;
+    if (alpha == 1.0) return standard_exponential(pcg);
+    if (alpha < 1.0)  return gamma_small(alpha, pcg);
+    return gamma_mt(alpha, pcg);
+}
+
+/* ================================================================== */
+/*  Dirichlet(alpha[0], alpha[1], alpha[2])                            */
+/* ================================================================== */
+
+void dirichlet_general(const double alpha[3], uint64_t *pcg, double w[3]) {
+    double g[3], sum = 0.0;
+    for (int i = 0; i < 3; i++) {
+        g[i] = gamma_sample(alpha[i], pcg);
+        sum += g[i];
+    }
+    for (int i = 0; i < 3; i++)
+        w[i] = g[i] / sum;
 }

@@ -13,10 +13,10 @@ scoring_sequential: scoring_sequential.c $(SHARED_SRC) $(SHARED_HDR)
 	$(CC) $(CFLAGS) scoring_sequential.c $(SHARED_SRC) -o scoring_sequential $(LDFLAGS)
 
 scoring_openmp: scoring_openmp.c $(SHARED_SRC) $(SHARED_HDR)
-	$(CC) $(CFLAGS) scoring_openmp.c $(SHARED_SRC) -o scoring_openmp $(LDFLAGS)
+	$(CC) $(CFLAGS) -fopenmp scoring_openmp.c $(SHARED_SRC) -o scoring_openmp $(LDFLAGS)
 
-scoring_mpi: scoring_mpi.c
-	$(MPICC) $(CFLAGS) $< -o $@ $(LDFLAGS) 2>/dev/null || echo "  [SKIP] mpicc no disponible"
+scoring_mpi: scoring_mpi.c $(SHARED_SRC) $(SHARED_HDR)
+	$(MPICC) $(CFLAGS) scoring_mpi.c $(SHARED_SRC) -o scoring_mpi $(LDFLAGS) 2>/dev/null || echo "  [SKIP] mpicc no disponible"
 
 clean:
 	rm -f scoring_openmp scoring_sequential scoring_mpi *.o

@@ -54,3 +54,16 @@ void log_complete(const char *impl, double auc, double cons,
  * Útil para re-ejecuciones sin reinicializar todo el logger.
  */
 void log_reset(void);
+
+/**
+ * @brief Reporta el mejor local encontrado por un worker.
+ *
+ * @param worker_id  ID del worker (0-indexed).
+ * @param auc        AUC del mejor local del worker.
+ * @param cons       Consistencia asociada.
+ * @param w          Pesos del mejor hallazgo.
+ * @param chunk_size Cantidad de candidatos evaluados en el chunk.
+ * @param is_best    1 si este worker tiene el mejor global, 0 en otro caso.
+ */
+void log_worker_report(int worker_id, double auc, double cons,
+                       const double w[3], int chunk_size, int is_best);

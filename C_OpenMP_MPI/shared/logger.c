@@ -133,3 +133,21 @@ void log_reset(void) {
     _improvement_count = 0;
     _best_auc          = -1.0;
 }
+
+void log_worker_report(int worker_id, double auc, double cons,
+                       const double w[3], int chunk_size, int is_best)
+{
+    /*
+     * Formato (idéntico a logger.py::worker_report):
+     *   [W2]  AUC 0.755600  consist=0.7300  w=[0.5954 0.1198 0.2848]  (500 cand.) ★
+     */
+    printf("  " ANSI_DIM ANSI_CYAN "[W%d]" ANSI_RESET "  "
+           ANSI_BOLD "AUC %.6f" ANSI_RESET "  "
+           "consist=%.4f  "
+           "w=[%.4f %.4f %.4f]  "
+           "(%d cand.)%s\n",
+           worker_id, auc, cons,
+           w[0], w[1], w[2],
+           chunk_size,
+           is_best ? " " ANSI_GOLD "\xe2\x98\x85" ANSI_RESET : "");
+}

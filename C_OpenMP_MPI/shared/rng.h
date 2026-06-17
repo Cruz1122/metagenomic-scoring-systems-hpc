@@ -10,6 +10,7 @@
  */
 #pragma once
 #include <stdint.h>
+#include <math.h>
 
 /**
  * @brief Inicializa estado PCG64[4] desde una semilla usando SeedSequence.
@@ -54,3 +55,26 @@ double u01(uint64_t *s);
  * @param[out] w  Pesos [w1, w2, w3] con suma ≈ 1.
  */
 void simplex(uint64_t *s, double w[3]);
+
+/**
+ * @brief Muestra Gamma(alpha, 1) para alpha > 0.
+ *
+ * Marsaglia-Tsang (alpha >= 1) + small-alpha rejection (0 < alpha < 1).
+ * Box-Muller para normal variate interna.
+ *
+ * @param alpha  Shape parameter (must be > 0).
+ * @param pcg    Estado PCG64 (se muta).
+ * @return       Muestra ~ Gamma(alpha, 1).
+ */
+double gamma_sample(double alpha, uint64_t *pcg);
+
+/**
+ * @brief Muestra Dirichlet(alpha[0], alpha[1], alpha[2]).
+ *
+ * w_i = Gamma(alpha_i, 1) / sum_j Gamma(alpha_j, 1)
+ *
+ * @param alpha  Parámetros de concentración [3] (cada uno > 0).
+ * @param pcg    Estado PCG64 (se muta).
+ * @param[out] w  Pesos [w1, w2, w3] con suma ≈ 1.
+ */
+void dirichlet_general(const double alpha[3], uint64_t *pcg, double w[3]);
