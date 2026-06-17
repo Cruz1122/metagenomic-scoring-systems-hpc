@@ -227,19 +227,24 @@ $f$ se estima empíricamente como la fracción del tiempo total que ocupa la par
 **Listing 1. Organización de carpetas**
 
 ```text
-scoring_metagenomico/
+metagenomic-scoring-systems-hpc/
 ├── data/
-│   ├── __init__.py
-│   ├── README.md
-│   └── generate_data.py         → [SCAFFOLD] genera A, y, profiles, true_w
+│   ├── processed/               → datasets generados
+│   │   ├── synthetic_CRC100x500_balanced/
+│   │   └── synthetic_CRC2000x500_balanced/
+│   └── scripts/
+│       └── generate_dataset.py  → genera A, y, profiles sintéticos
 ├── python/
 │   ├── __init__.py
-│   ├── common.py                → [SCAFFOLD] métricas y búsqueda
-│   ├── sequential.py            → [SCAFFOLD] baseline
-│   └── multicore.py             → [IMPLEMENTADO] multiprocessing con Pool.map
+│   ├── common.py                → [IMPLEMENTADO] SearchResult, load_data, evaluate
+│   ├── sequential.py            → [IMPLEMENTADO] random/grid/hybrid search
+│   ├── multicore.py             → [IMPLEMENTADO] multiprocessing con Pool.map
+│   └── logger.py                → [IMPLEMENTADO] logger ANSI
 ├── C_OpenMP_MPI/
-│   ├── scoring_openmp.c         → [SCAFFOLD] OpenMP
+│   ├── scoring_sequential.c     → [IMPLEMENTADO] baseline C secuencial
+│   ├── scoring_openmp.c         → [IMPLEMENTADO] OpenMP: 3 estrategias
 │   ├── scoring_mpi.c            → [SCAFFOLD] MPI
+│   ├── shared/                  → [IMPLEMENTADO] common, RNG, ziggurat, logger
 │   └── Makefile
 ├── CUDA/
 │   ├── scoring_kernel.cu        → [SCAFFOLD] CUDA C
@@ -250,8 +255,8 @@ scoring_metagenomico/
 │   └── plot_benchmark.py        → [SCAFFOLD]
 ├── results/
 │   └── plots/
-├── docs/                       → especificación técnica (12 .md)
-├── report/                     → plantilla informe
+├── docs/                       → especificación técnica (13 .md + prompts/)
+├── DATASET.md                  → descripción de datasets
 ├── run_all.sh                  → pipeline benchmark
 ├── Makefile
 ├── PROJECT.md
@@ -263,43 +268,27 @@ scoring_metagenomico/
 
 ## 6. Script de Generación de Datos
 
-**Listing 2. `data/generate_data.py` (scaffold)**
+**Listing 2. `data/scripts/generate_dataset.py` (implementado)**
 
-```python
-#!/usr/bin/env python3
-from __future__ import annotations
-import argparse, json
-from pathlib import Path
-import numpy as np
+El generador produce datasets sintéticos con señal controlada basada en:
 
+- **Abundancia relativa:** modelo gamma + ruido lognormal + factor de clase + metadata.
+- **Perfiles T/S/F:** T desde log2FC de cohorte REF, S desde correlación con metadata, F desde marcadores funcionales.
+- **REF/EVAL split:** T y S se estiman de REF independiente para evitar fuga de etiqueta.
 
-def generate_data(n_items: int = 50, seed: int = 42, signal: float = 6.0):
-    """Genera A (10×N), y (10), profiles (N×3) y true_w sintéticos.
-    
-    Args:
-        n_items: número de features (microbiomas)
-        seed: semilla RNG
-        signal: separabilidad entre grupos (mayor = más separable)
+Uso:
 
-    Returns:
-        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-            (A, y, profiles, true_w)
-    """
-    # TODO: implementar generación sintética
-    raise NotImplementedError('Implementar generación de datos')
+```bash
+# 2000 muestras, 500 items (default)
+python data/scripts/generate_dataset.py
 
-
-def main():
-    """CLI: genera datos y los guarda en --out-dir."""
-    ap = argparse.ArgumentParser(...)
-    # TODO: generar y guardar .npy, .csv, metadata.json
-
-
-if __name__ == '__main__':
-    main()
+# 100 muestras (desarrollo rápido)
+python data/scripts/generate_dataset.py --n-eval 100 --n-ref 200 --allow-small
 ```
 
-> ⚠️ **Scaffold:** el código actual es un esqueleto con docstrings y `NotImplementedError`. Las funciones deben implementarse según la especificación de las secciones 2-3.
+Parámetros clave: `--signal`, `--t-strength`, `--metadata-strength`, `--zero-inflation`, `--noise-sigma`.
+
+Ver `DATASET.md` y `docs/03_datos_y_seed.md` para detalles completos.
 
 ---
 

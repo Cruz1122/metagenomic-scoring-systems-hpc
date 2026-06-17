@@ -44,19 +44,31 @@ Nivel 3 — CUDA + PyCUDA   → aceleración GPU masivamente paralela
 ## Estructura del repositorio
 
 ```text
-scoring_metagenomico/
+metagenomic-scoring-systems-hpc/
 ├── data/
-│   ├── __init__.py             → docstring del paquete
-│   ├── README.md               → descripción de datos generados
-│   ├── generate_data.py        → genera dataset sintético (en scripts/)
+│   ├── csv/                    → symlink a processed/.../csv/
+│   ├── npy/                    → symlink a processed/.../npy/
+│   ├── dataset_manifest.json   → symlink a processed/.../dataset_manifest.json
+│   ├── processed/              → datasets generados
+│   │   ├── synthetic_CRC100x500_balanced/   → 100 muestras (desarrollo)
+│   │   └── synthetic_CRC2000x500_balanced/  → 2000 muestras (default)
+│   └── scripts/
+│       └── generate_dataset.py → genera dataset sintético (implementado)
 ├── python/
 │   ├── __init__.py             → docstring del paquete
-│   ├── common.py               → [SCAFFOLD] dataclass SearchResult + funciones vacías
-│   ├── sequential.py           → [SCAFFOLD] baseline secuencial
-│   └── multicore.py            → [SCAFFOLD] multiprocessing
+│   ├── common.py               → SearchResult, load_data, evaluate, AUC, consistency
+│   ├── sequential.py           → baseline: random/grid/hybrid search (implementado)
+│   ├── multicore.py            → multiprocessing Pool.map (implementado)
+│   └── logger.py               → logger colorido ANSI
 ├── C_OpenMP_MPI/
+│   ├── scoring_sequential.c    → baseline C secuencial
 │   ├── scoring_openmp.c        → OpenMP: random + grid + hybrid (3 estrategias)
 │   ├── scoring_mpi.c           → [SCAFFOLD] MPI: reusa shared/
+│   ├── shared/                 → código compartido C
+│   │   ├── common.h/c          → load_data, evaluate, AUC, consistency
+│   │   ├── rng.h/c             → PCG64 + Dirichlet
+│   │   ├── ziggurat.h/c        → generador Ziggurat
+│   │   └── logger.h/c          → logger ANSI
 │   └── Makefile                → compilación gcc / mpicc
 ├── CUDA/
 │   ├── scoring_kernel.cu       → [SCAFFOLD] kernel CUDA + TODO
@@ -67,10 +79,11 @@ scoring_metagenomico/
 │   └── plot_benchmark.py        → [SCAFFOLD] gráficas de benchmark
 ├── results/
 │   └── plots/                  → .gitkeep (gráficas se generan con make plots)
-├── docs/                       → documentación técnica (12 archivos .md)
-├── report/                     → plantilla de informe técnico
+├── docs/                       → documentación técnica (13 .md + prompts/)
+│   └── prompts/                → prompts de dataset analysis
+├── DATASET.md                  → descripción de datasets disponibles
 ├── run_all.sh                  → pipeline de benchmark automatizado
-├── Makefile                    → atajos data, python-seq, openmp, mpi, cuda, benchmark
+├── Makefile                    → atajos data, python-seq/grid/hybrid, python-mp/grid/hybrid, seq-run, openmp-run, mpi-run, cuda, benchmark
 ├── PROJECT.md                  → especificación contractual del proyecto
 ├── icon.svg                    → logo del proyecto
 ├── requirements.txt            → dependencias Python
@@ -103,7 +116,17 @@ pip install -r requirements.txt
 ### 1. Generar datos
 
 ```bash
-python data/scripts/generate_data.py
+# 2000 muestras (default)
+make data
+
+# 100 muestras (desarrollo rápido)
+make data-100
+
+# Directo
+python data/scripts/generate_dataset.py
+
+# 100 muestras (desarrollo rápido)
+python data/scripts/generate_dataset.py --n-eval 100 --n-ref 200 --allow-small
 ```
 
 ### 2. Python (baseline)
@@ -113,37 +136,46 @@ make python-seq K=10000         # secuencial
 make python-mp K=10000 WORKERS=4  # multicore
 ```
 
-### 3. C/OpenMP
+### 3. C secuencial
 
 ```bash
-make c                          # compila ambos
+make seq-run K=10000            # compila y ejecuta baseline C
+```
+
+### 4. C/OpenMP
+
+```bash
+make c                          # compila todos los binarios C
 OMP_NUM_THREADS=4 ./C_OpenMP_MPI/scoring_openmp --k 100000 --seed 42 --data-dir data
 ```
 
-### 4. C/MPI
+### 5. C/MPI
 
 ```bash
 make -C C_OpenMP_MPI scoring_mpi
 mpirun -np 4 ./C_OpenMP_MPI/scoring_mpi --k 100000 --seed 42 --data-dir data
 ```
+> ⚠️ **Scaffold:** MPI imprime salida placeholder. Falta implementar la lógica de búsqueda distribuida.
 
-### 5. CUDA
+### 6. CUDA
 
 ```bash
 make cuda                       # compila kernel CUDA C
 make cuda-run K=100000
 python CUDA/scoring_pycuda.py --k 100000 --seed 42 --data-dir data
 ```
+> ⚠️ **Scaffold:** CUDA C y PyCUDA tienen TODOs. PyCUDA corre como fallback serial.
 
-### 6. Benchmark integral
+### 7. Benchmark integral
 
 ```bash
-./run_all.sh
+./run_all.sh                              # 2000 muestras
+DATASET_SIZE=100 ./run_all.sh             # 100 muestras (rápido)
 # Sobrescribe variables de entorno para configurar:
-N_ITEMS=500 K=100000 SEED=42 THREADS_LIST="1 2 4 8" WORKERS_LIST="2 4" MPI_RANKS_LIST="2 4" ./run_all.sh
+DATASET_SIZE=2000 N_ITEMS=500 K=100000 SEED=42 THREADS_LIST="1 2 4 8" WORKERS_LIST="2 4" MPI_RANKS_LIST="2 4" ./run_all.sh
 ```
 
-Resultado: se genera `results/benchmark.csv` (no trackeado en git). Columnas: `implementation, parallel_units, n_items, k, time_sec, auc, consistency, w1, w2, w3, seed, speedup, efficiency`.
+Resultado: se genera `results/benchmark_raw.csv` con columnas `implementation,parallel_units,n_items,k,time_sec,auc,consistency,w1,w2,w3,seed,search_mode,iterations_until_best`. Post-procesado genera `results/benchmark.csv` añadiendo `speedup, efficiency`.
 
 ---
 
@@ -152,11 +184,11 @@ Resultado: se genera `results/benchmark.csv` (no trackeado en git). Columnas: `i
 Toda implementación imprime una línea CSV con:
 
 ```text
-implementation,parallel_units,n_items,k,time_sec,auc,consistency,w1,w2,w3,seed
+implementation,parallel_units,n_items,k,time_sec,auc,consistency,w1,w2,w3,seed,search_mode,iterations_until_best
 ```
 
 | Columna | Descripción |
-|---|---|
+|---|---|---|
 | `implementation` | Identificador: `python_sequential`, `python_multicore`, `c_openmp`, `c_mpi`, `cuda_c`, `pycuda` |
 | `parallel_units` | Hilos / procesos / ranks usados |
 | `n_items` | Número de items (N) |
@@ -166,6 +198,8 @@ implementation,parallel_units,n_items,k,time_sec,auc,consistency,w1,w2,w3,seed
 | `consistency` | Balanced accuracy máxima |
 | `w1..w3` | Pesos del mejor candidato |
 | `seed` | Semilla de reproducibilidad |
+| `search_mode` | Estrategia: `random` \| `grid` \| `hybrid` |
+| `iterations_until_best` | Iteración donde se encontró el mejor AUC |
 
 El postprocesado (`scripts/postprocess_benchmark.py`) agrega `speedup = T_seq / T_impl` y `efficiency = speedup / parallel_units`.
 
@@ -239,4 +273,5 @@ El contrato define perfiles `T_i`, `S_i`, `F_i` en `item_profiles.csv` y `profil
 - **No compares tiempos entre implementaciones si cambiaste N, K, seed o dataset.**
 - **No optimices código que no reproduce el AUC** — si la búsqueda no encuentra el máximo, la optimización de tiempo es irrelevante.
 - **MPI en una sola máquina mide overhead**, no escalabilidad real.
-- **`C/OpenMP` implementado** (3 estrategias: random, grid, hybrid). `C/MPI`, `CUDA`, `scripts/` y `python/` son scaffold con TODO pendiente.
+- **Implementado:** `python/` (sequential, multicore, grid, hybrid), `C/OpenMP` (3 estrategias), generación de datos sintéticos.
+- **Scaffold con TODO:** `C/MPI` (scoring_mpi.c), `CUDA/` (kernel.cu + pycuda.py), `scripts/postprocess_benchmark.py`, `scripts/plot_benchmark.py`.

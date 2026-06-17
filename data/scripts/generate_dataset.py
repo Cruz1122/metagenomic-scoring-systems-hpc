@@ -1,613 +1,757 @@
 #!/usr/bin/env python3
 """
-generate_dataset.py — Generador con perfiles T, S, F calibrados.
+generate_dataset.py — synthetic-compatible metagenomic scoring dataset.
 
-Parámetros de calibración:
-  --t-strength        Compresión de T hacia 0.5 (0.70-1.00)
-  --metadata-strength Efecto de metadata_risk sobre abundancia (0.00-0.30)
-  --functional-overlap % de items enriquecidos con perfil funcional alineado (0.30-0.50)
+Default dataset:
+  EVAL: 2000 samples = 1000 healthy + 1000 CRC
+  REF:  1000 samples = 500 healthy + 500 CRC
+  Items: 500
+  Seed: 42
 
-Arquitectura:
-  REF (200) → T, S
-  EVAL (100) → benchmark
+Contract:
+  P = profiles_TSF @ W
+  Score = matrix_A @ P
+  AUC = auc(labels, Score)
+
+Why REF/EVAL:
+  T and S are estimated from REF.
+  matrix_A.npy and labels.npy are exported from EVAL.
+  This prevents computing profiles from the same cohort used for benchmark AUC.
 """
 from __future__ import annotations
+
 import argparse
 import json
+import math
+import shutil
 from pathlib import Path
-import sys
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-# ---------------------------------------------------------------------------
-# Constantes
-# ---------------------------------------------------------------------------
-DEFAULT_N_EVAL = 100
-DEFAULT_N_REF = 200
+
+DEFAULT_N_EVAL = 2000
+DEFAULT_N_REF = 1000
 DEFAULT_N_ITEMS = 500
 DEFAULT_SEED = 42
-DEFAULT_SIGNAL = 1.0
+
+DEFAULT_SIGNAL = 0.45
 DEFAULT_T_STRENGTH = 0.85
-DEFAULT_METADATA_STRENGTH = 0.20
-DEFAULT_FUNCTIONAL_OVERLAP = 0.40
+DEFAULT_METADATA_STRENGTH = 0.08
+DEFAULT_FUNCTIONAL_OVERLAP = 0.30
+DEFAULT_METADATA_FRACTION = 0.22
+DEFAULT_ZERO_INFLATION = 0.08
+DEFAULT_NOISE_SIGMA = 0.35
 
-CRC_ENRICHED_FRACTION = 0.05
-HEALTHY_ENRICHED_FRACTION = 0.10
+CRC_ENRICHED_FRACTION = 0.08
+HEALTHY_ENRICHED_FRACTION = 0.08
 
-STUDY_NAME = "synthetic_CRC_study"
+STUDY_NAME = "synthetic_CRC_study_scaled"
 
 FUNCTIONAL_MARKER_COLS = [
-    "resistance_marker", "virulence_marker", "inflammation_marker",
-    "metabolic_marker", "beneficial_marker",
+    "resistance_marker",
+    "virulence_marker",
+    "inflammation_marker",
+    "metabolic_marker",
+    "beneficial_marker",
 ]
 
-# Probabilidades funcionales (se mantienen fijas, el overlap controla cuántos
-# items las reciben)
-PROBS_CRC = (0.10, 0.25, 0.30, 0.45, 0.10)
-PROBS_HEALTHY = (0.04, 0.06, 0.08, 0.55, 0.35)
-PROBS_NEUTRAL = (0.05, 0.08, 0.10, 0.45, 0.18)
+
+def require_even_positive(name: str, value: int) -> None:
+    if value <= 0:
+        raise ValueError(f"{name} debe ser positivo. Recibido: {value}")
+    if value % 2 != 0:
+        raise ValueError(f"{name} debe ser par para balancear clases. Recibido: {value}")
 
 
-# ---------------------------------------------------------------------------
-# Auxiliares estadísticos
-# ---------------------------------------------------------------------------
-
-def _abs_pearson(x: np.ndarray, y: np.ndarray) -> float:
-    mask = ~(np.isnan(x) | np.isnan(y))
-    x_c, y_c = x[mask], y[mask]
-    if len(x_c) < 3 or np.std(x_c) == 0 or np.std(y_c) == 0:
-        return 0.0
-    r = np.corrcoef(x_c, y_c)[0, 1]
-    return abs(r) if not np.isnan(r) else 0.0
+def zscore(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float64)
+    sd = float(np.std(x))
+    if sd <= 1e-12:
+        return np.zeros_like(x, dtype=np.float64)
+    return (x - float(np.mean(x))) / sd
 
 
-def _correlation_ratio(x: np.ndarray, categories: np.ndarray) -> float:
-    cats = np.unique(categories)
-    if len(cats) < 2:
-        return 0.0
-    gm = float(np.mean(x))
-    ssb = sum(int((categories == c).sum()) * (float(np.mean(x[categories == c])) - gm) ** 2 for c in cats)
-    sst = float(np.sum((x - gm) ** 2))
-    return np.sqrt(ssb / sst) if sst > 0 else 0.0
+def sigmoid(x: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-x))
 
 
-# ---------------------------------------------------------------------------
-# 1. Componentes base
-# ---------------------------------------------------------------------------
+def normalize_rows(A: np.ndarray) -> np.ndarray:
+    A = np.asarray(A, dtype=np.float64)
+    A[~np.isfinite(A)] = 0.0
+    A[A < 0.0] = 0.0
 
-def generate_labels(n: int, rng: np.random.Generator) -> pd.DataFrame:
+    row_sums = A.sum(axis=1)
+    bad = row_sums <= 0.0
+    if np.any(bad):
+        # Fallback defensivo: filas completamente vacías reciben abundancia uniforme.
+        A[bad, :] = 1.0
+        row_sums = A.sum(axis=1)
+
+    A = A / row_sums[:, None]
+    return A.astype(np.float32)
+
+
+def auc_rank(y_true: np.ndarray, scores: np.ndarray) -> float:
+    """ROC AUC por rangos con promedio de empates; sin dependencia sklearn."""
+    y = np.asarray(y_true, dtype=np.int32)
+    s = np.asarray(scores, dtype=np.float64)
+
+    pos = y == 1
+    n_pos = int(pos.sum())
+    n_neg = int((~pos).sum())
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+
+    order = np.argsort(s, kind="mergesort")
+    sorted_s = s[order]
+
+    ranks = np.empty(len(s), dtype=np.float64)
+    i = 0
+    while i < len(s):
+        j = i + 1
+        while j < len(s) and sorted_s[j] == sorted_s[i]:
+            j += 1
+        avg_rank = 0.5 * (i + 1 + j)
+        ranks[order[i:j]] = avg_rank
+        i = j
+
+    return float((ranks[pos].sum() - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg))
+
+
+def generate_labels(n: int, cohort: str, rng: np.random.Generator) -> pd.DataFrame:
+    require_even_positive(f"n_{cohort}", n)
+
     n_h = n // 2
-    rows = [{"sample_id": f"CTRL_{i+1:03d}", "label": 0, "group": "healthy"} for i in range(n_h)]
-    rows += [{"sample_id": f"CRC_{i+1:03d}", "label": 1, "group": "CRC"} for i in range(n - n_h)]
-    return pd.DataFrame(rows)
+    rows = []
+    for i in range(n_h):
+        rows.append(
+            {
+                "sample_id": f"{cohort}_CTRL_{i + 1:05d}",
+                "label": 0,
+                "group": "healthy",
+            }
+        )
+    for i in range(n_h):
+        rows.append(
+            {
+                "sample_id": f"{cohort}_CRC_{i + 1:05d}",
+                "label": 1,
+                "group": "CRC",
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    perm = rng.permutation(len(df))
+    return df.iloc[perm].reset_index(drop=True)
 
 
-def generate_metadata(labels: np.ndarray, rng: np.random.Generator) -> pd.DataFrame:
-    """Metadata IDÉNTICA entre grupos (sin correlación mr-label).
-    
-    La señal de S viene exclusivamente del metadata_effect en abundancia,
-    no de diferencias entre grupos. Esto evita que S sea un proxy de T.
+def generate_metadata(samples: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
     """
-    n = len(labels)
-    countries = ["France", "Germany", "Spain", "Italy", "Denmark"]
-    age = rng.normal(loc=58.0, scale=7.0, size=n)
-    age = np.clip(np.round(age), 30, 85).astype(int)
-    bmi = rng.normal(loc=25.3, scale=2.5, size=n)
-    bmi = np.clip(bmi, 18.0, 35.0).round(1)
-    samples = pd.DataFrame({"sample_id": [f"S{i+1:03d}" for i in range(n)]})
-    meta = samples.copy()
-    meta["age"] = age
-    meta["sex"] = rng.choice(["male", "female"], size=n)
-    meta["bmi"] = bmi
-    meta["country"] = rng.choice(countries, size=n)
-    meta["study_name"] = STUDY_NAME
-    meta["disease"] = np.where(labels == 1, "CRC", "healthy")
+    Metadata no separa directamente CRC vs healthy.
+
+    age y bmi se generan con la misma distribución marginal para ambas clases.
+    La variable disease solo se conserva como etiqueta descriptiva.
+    """
+    n = len(samples)
+
+    age = rng.normal(loc=58.0, scale=8.0, size=n)
+    age = np.clip(np.rint(age), 30, 85).astype(np.int32)
+
+    bmi = rng.normal(loc=25.2, scale=2.8, size=n)
+    bmi = np.clip(bmi, 18.0, 36.0).round(1)
+
+    sex = rng.choice(["male", "female"], size=n, p=[0.50, 0.50])
+    country = rng.choice(
+        ["France", "Germany", "Spain", "Italy", "Denmark", "Netherlands"],
+        size=n,
+        p=[0.18, 0.18, 0.16, 0.16, 0.16, 0.16],
+    )
+
+    meta = pd.DataFrame(
+        {
+            "sample_id": samples["sample_id"].to_numpy(),
+            "age": age,
+            "sex": sex,
+            "bmi": bmi,
+            "country": country,
+            "study_name": STUDY_NAME,
+            "disease": samples["group"].to_numpy(),
+        }
+    )
     return meta
 
 
-def _signal_factors(signal: float):
-    up = 1.0 + 0.10 * signal
-    down = 1.0 - 0.05 * signal
-    return up, down
+def metadata_risk_from_metadata(meta: pd.DataFrame) -> np.ndarray:
+    age_z = zscore(meta["age"].to_numpy(dtype=np.float64))
+    bmi_z = zscore(meta["bmi"].to_numpy(dtype=np.float64))
+    risk = 0.65 * age_z + 0.35 * bmi_z
+    return zscore(risk)
 
 
 def generate_item_groups(n_items: int, rng: np.random.Generator) -> np.ndarray:
     n_crc = max(1, int(round(CRC_ENRICHED_FRACTION * n_items)))
     n_healthy = max(1, int(round(HEALTHY_ENRICHED_FRACTION * n_items)))
+
+    if n_crc + n_healthy >= n_items:
+        raise ValueError("Las fracciones de items diferenciales exceden n_items.")
+
     groups = np.array(["neutral"] * n_items, dtype=object)
     groups[:n_crc] = "CRC_enriched"
-    groups[n_crc:n_crc + n_healthy] = "healthy_enriched"
+    groups[n_crc : n_crc + n_healthy] = "healthy_enriched"
+    rng.shuffle(groups)
     return groups
 
 
-# ---------------------------------------------------------------------------
-# 2. Abundancia con señal de clase + metadata
-# ---------------------------------------------------------------------------
+def generate_taxon_names(item_groups: np.ndarray, rng: np.random.Generator) -> list[str]:
+    crc_genera = [
+        "Fusobacterium",
+        "Parvimonas",
+        "Peptostreptococcus",
+        "Porphyromonas",
+        "Gemella",
+        "Solobacterium",
+        "Campylobacter",
+        "Morganella",
+    ]
+    healthy_genera = [
+        "Faecalibacterium",
+        "Roseburia",
+        "Eubacterium",
+        "Anaerostipes",
+        "Agathobacter",
+        "Coprococcus",
+        "Bifidobacterium",
+        "Akkermansia",
+    ]
+    neutral_genera = [
+        "Bacteroides",
+        "Prevotella",
+        "Alistipes",
+        "Ruminococcus",
+        "Dorea",
+        "Collinsella",
+        "Blautia",
+        "Clostridium",
+        "Oscillibacter",
+        "Subdoligranulum",
+    ]
+
+    names = []
+    counters: dict[str, int] = {}
+    for g in item_groups:
+        if g == "CRC_enriched":
+            genus = str(rng.choice(crc_genera))
+        elif g == "healthy_enriched":
+            genus = str(rng.choice(healthy_genera))
+        else:
+            genus = str(rng.choice(neutral_genera))
+
+        counters[genus] = counters.get(genus, 0) + 1
+        names.append(f"{genus} synthetic_species_{counters[genus]:03d}")
+
+    return names
+
+
+def build_metadata_effects(
+    item_groups: np.ndarray,
+    rng: np.random.Generator,
+    metadata_fraction: float,
+) -> np.ndarray:
+    """
+    Selecciona items sensibles a metadata.
+
+    El efecto no se calcula con labels, pero se fuerza un solapamiento moderado
+    con los grupos diferenciales para que S tenga señal útil sin convertirse en
+    fuga directa de etiqueta.
+    """
+    n_items = len(item_groups)
+    n_active = max(1, int(round(metadata_fraction * n_items)))
+
+    effect = np.zeros(n_items, dtype=np.float64)
+    crc_idx = np.where(item_groups == "CRC_enriched")[0]
+    healthy_idx = np.where(item_groups == "healthy_enriched")[0]
+    neutral_idx = np.where(item_groups == "neutral")[0]
+
+    # 40% de activos diferenciales, 60% neutrales.
+    n_diff_active = min(len(crc_idx) + len(healthy_idx), int(round(0.40 * n_active)))
+    n_neutral_active = max(0, n_active - n_diff_active)
+
+    diff_pool = np.concatenate([crc_idx, healthy_idx])
+    if len(diff_pool) > 0 and n_diff_active > 0:
+        diff_active = rng.choice(diff_pool, size=n_diff_active, replace=False)
+        for j in diff_active:
+            if item_groups[j] == "CRC_enriched":
+                effect[j] = rng.uniform(0.55, 1.00)
+            elif item_groups[j] == "healthy_enriched":
+                effect[j] = -rng.uniform(0.55, 1.00)
+
+    if len(neutral_idx) > 0 and n_neutral_active > 0:
+        neutral_active = rng.choice(neutral_idx, size=min(n_neutral_active, len(neutral_idx)), replace=False)
+        effect[neutral_active] = rng.choice([-1.0, 1.0], size=len(neutral_active)) * rng.uniform(
+            0.30, 0.75, size=len(neutral_active)
+        )
+
+    return effect
+
 
 def generate_abundance(
     labels: np.ndarray,
     item_groups: np.ndarray,
+    metadata_risk: np.ndarray,
+    metadata_effect: np.ndarray,
     rng: np.random.Generator,
-    signal: float = 1.0,
-    metadata_risk: np.ndarray | None = None,
-    item_metadata_effect: np.ndarray | None = None,
-    metadata_strength: float = 0.0,
+    signal: float,
+    metadata_strength: float,
+    zero_inflation: float,
+    noise_sigma: float,
 ) -> np.ndarray:
-    """Genera abundancia con efecto de clase y efecto opcional de metadata.
-    
-    Args:
-        labels: Vector 0/1 (n,).
-        item_groups: Grupo por item (n_items,).
-        rng: RNG.
-        signal: Nivel de señal de clase.
-        metadata_risk: Score de riesgo por muestra (n,), opcional.
-        item_metadata_effect: Efecto de metadata por item (n_items,), opcional.
-        metadata_strength: Peso del efecto metadata.
-    """
-    n = len(labels)
+    n_samples = len(labels)
     n_items = len(item_groups)
-    is_h = (labels == 0)
-    is_c = (labels == 1)
 
-    abundances = rng.uniform(0.05, 1.0, size=(n, n_items)).astype(np.float64)
-    up, down = _signal_factors(signal)
+    # Base composicional: gamma normalizada crea abundancias relativas heterogéneas.
+    base = rng.gamma(shape=0.45, scale=1.0, size=n_items)
+    base = base / base.sum()
 
-    for i in range(n_items):
-        g = item_groups[i]
-        if g == "CRC_enriched":
-            abundances[is_h, i] *= down
-            abundances[is_c, i] *= up
-        elif g == "healthy_enriched":
-            abundances[is_h, i] *= up
-            abundances[is_c, i] *= down
+    raw = np.empty((n_samples, n_items), dtype=np.float64)
 
-    # Efecto metadata (independiente de clase)
-    if metadata_risk is not None and item_metadata_effect is not None and metadata_strength > 0:
-        mr = (metadata_risk - metadata_risk.mean()) / (metadata_risk.std() + 1e-12)
-        for i in range(n_items):
-            if item_metadata_effect[i] != 0:
-                abundances[:, i] *= np.exp(metadata_strength * mr * item_metadata_effect[i])
+    class_effect = np.ones(n_items, dtype=np.float64)
+    crc_mask = item_groups == "CRC_enriched"
+    healthy_mask = item_groups == "healthy_enriched"
 
-    # Ruido
-    noise = rng.lognormal(mean=0.0, sigma=0.35, size=abundances.shape)
-    abundances *= noise
-    abundances = np.maximum(abundances, 0.0)
-    abundances /= abundances.sum(axis=1, keepdims=True)
-    return abundances.astype(np.float32)
+    # Señal moderada; con 2000 muestras, señales muy altas vuelven el AUC trivial.
+    up = math.exp(0.24 * signal)
+    down = math.exp(-0.14 * signal)
 
+    for i in range(n_samples):
+        factors = class_effect.copy()
 
-# ---------------------------------------------------------------------------
-# 3. Matriz funcional (Bernoulli, decorativa) + F directo
-# ---------------------------------------------------------------------------
-
-def generate_functional_matrix(
-    item_groups: np.ndarray,
-    rng: np.random.Generator,
-    functional_overlap: float = 0.40,
-) -> pd.DataFrame:
-    """Genera marcadores Bernoulli para CSV (decorativo).
-    
-    functional_overlap: proporción de items enriquecidos que reciben
-    perfil funcional alineado. El resto recibe neutral.
-    Los neutrales tienen 10% de recibir perfil alineado por azar.
-    """
-    n_items = len(item_groups)
-    rows = []
-    for i in range(n_items):
-        g = item_groups[i]
-        if g == "CRC_enriched":
-            probs = PROBS_CRC if rng.random() < functional_overlap else PROBS_NEUTRAL
-        elif g == "healthy_enriched":
-            probs = PROBS_HEALTHY if rng.random() < functional_overlap else PROBS_NEUTRAL
+        if labels[i] == 1:
+            factors[crc_mask] *= up
+            factors[healthy_mask] *= down
         else:
-            rv = rng.random()
-            if rv < 0.10:
-                probs = PROBS_CRC
-            elif rv < 0.20:
-                probs = PROBS_HEALTHY
-            else:
-                probs = PROBS_NEUTRAL
-        pR, pV, pI, pM, pB = probs
-        rows.append({
-            "item_id": f"item_{i:03d}",
-            "resistance_marker": int(rng.random() < pR),
-            "virulence_marker": int(rng.random() < pV),
-            "inflammation_marker": int(rng.random() < pI),
-            "metabolic_marker": int(rng.random() < pM),
-            "beneficial_marker": int(rng.random() < pB),
-        })
-    return pd.DataFrame(rows)
+            factors[crc_mask] *= down
+            factors[healthy_mask] *= up
+
+        if metadata_strength > 0:
+            factors *= np.exp(metadata_strength * metadata_risk[i] * metadata_effect)
+
+        noise = rng.lognormal(mean=0.0, sigma=noise_sigma, size=n_items)
+        row = base * factors * noise
+
+        if zero_inflation > 0:
+            prevalence = sigmoid(-1.15 + 6.0 * np.sqrt(base / base.max()))
+            keep_prob = np.clip((1.0 - zero_inflation) * prevalence + 0.10, 0.05, 1.0)
+            keep = rng.random(n_items) < keep_prob
+            if keep.sum() < max(10, int(0.03 * n_items)):
+                keep[rng.choice(n_items, size=max(10, int(0.03 * n_items)), replace=False)] = True
+            row *= keep
+
+        raw[i, :] = row
+
+    return normalize_rows(raw)
+
+
+def compute_T(A_ref: np.ndarray, y_ref: np.ndarray, t_strength: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    eps = 1e-9
+    mean_crc = A_ref[y_ref == 1].mean(axis=0)
+    mean_h = A_ref[y_ref == 0].mean(axis=0)
+
+    log2fc = np.log2((mean_crc + eps) / (mean_h + eps))
+    T0 = 0.5 + 0.5 * np.tanh(log2fc / 2.0)
+    T = 0.5 + t_strength * (T0 - 0.5)
+    T = np.clip(T, 0.0, 1.0).astype(np.float32)
+
+    delta = mean_crc - mean_h
+    threshold = float(np.quantile(np.abs(delta), 0.70))
+    direction = np.where(
+        delta > threshold,
+        "CRC_enriched",
+        np.where(delta < -threshold, "healthy_enriched", "neutral"),
+    )
+    return T, direction, log2fc.astype(np.float32)
+
+
+def compute_S(A_ref: np.ndarray, metadata_risk_ref: np.ndarray) -> np.ndarray:
+    S = np.empty(A_ref.shape[1], dtype=np.float32)
+    r = np.asarray(metadata_risk_ref, dtype=np.float64)
+
+    for j in range(A_ref.shape[1]):
+        x = A_ref[:, j].astype(np.float64)
+        if np.std(x) <= 1e-12 or np.std(r) <= 1e-12:
+            S[j] = 0.5
+        else:
+            c = np.corrcoef(x, r)[0, 1]
+            if not np.isfinite(c):
+                c = 0.0
+            S[j] = 0.5 + 0.5 * c
+
+    return np.clip(S, 0.0, 1.0).astype(np.float32)
 
 
 def compute_F(
     item_groups: np.ndarray,
+    taxon_names: list[str],
     rng: np.random.Generator,
-    functional_overlap: float = 0.40,
-) -> np.ndarray:
-    """Calcula F directo desde grupo del item con overlap controlado.
-    
-    En lugar de Bernoulli, asigna valores fijos + ruido.
-    functional_overlap controla cuántos items enriquecidos tienen F alineado.
-    """
-    n_items = len(item_groups)
-    F_CRC = 0.85
-    F_HEALTHY = 0.15
-    F_NEUTRAL = 0.50
+    functional_overlap: float,
+) -> tuple[np.ndarray, pd.DataFrame]:
+    n = len(item_groups)
+    raw = np.full(n, 0.5, dtype=np.float64)
 
-    Fp = np.full(n_items, F_NEUTRAL, dtype=float)
-    for i in range(n_items):
-        g = item_groups[i]
-        if g == "CRC_enriched":
-            if rng.random() < functional_overlap:
-                Fp[i] = F_CRC
-        elif g == "healthy_enriched":
-            if rng.random() < functional_overlap:
-                Fp[i] = F_HEALTHY
+    crc_idx = np.where(item_groups == "CRC_enriched")[0]
+    healthy_idx = np.where(item_groups == "healthy_enriched")[0]
+
+    n_crc_active = int(round(functional_overlap * len(crc_idx)))
+    n_healthy_active = int(round(functional_overlap * len(healthy_idx)))
+
+    crc_active = set(rng.choice(crc_idx, size=n_crc_active, replace=False).tolist()) if n_crc_active > 0 else set()
+    healthy_active = set(rng.choice(healthy_idx, size=n_healthy_active, replace=False).tolist()) if n_healthy_active > 0 else set()
+
+    resistance = np.zeros(n, dtype=np.int32)
+    virulence = np.zeros(n, dtype=np.int32)
+    inflammation = np.zeros(n, dtype=np.int32)
+    metabolic = np.zeros(n, dtype=np.int32)
+    beneficial = np.zeros(n, dtype=np.int32)
+
+    for i, group in enumerate(item_groups):
+        if group == "CRC_enriched":
+            if i in crc_active:
+                raw[i] = rng.normal(0.76, 0.06)
+                virulence[i] = 1
+                inflammation[i] = 1
+                resistance[i] = int(rng.random() < 0.35)
+            else:
+                raw[i] = rng.normal(0.58, 0.06)
+                virulence[i] = int(rng.random() < 0.25)
+        elif group == "healthy_enriched":
+            if i in healthy_active:
+                raw[i] = rng.normal(0.25, 0.06)
+                beneficial[i] = 1
+                metabolic[i] = 1
+            else:
+                raw[i] = rng.normal(0.42, 0.06)
+                beneficial[i] = int(rng.random() < 0.30)
         else:
-            rv = rng.random()
-            if rv < 0.10:
-                Fp[i] = F_CRC
-            elif rv < 0.20:
-                Fp[i] = F_HEALTHY
+            raw[i] = rng.normal(0.50, 0.08)
+            metabolic[i] = int(rng.random() < 0.25)
+            beneficial[i] = int(rng.random() < 0.15)
+            virulence[i] = int(rng.random() < 0.08)
+            inflammation[i] = int(rng.random() < 0.10)
+            resistance[i] = int(rng.random() < 0.05)
 
-    noise = rng.normal(0, 0.04, size=n_items)
-    Fp = np.clip(Fp + noise, 0.0, 1.0)
-    return Fp
+    F = np.clip(raw, 0.0, 1.0).astype(np.float32)
 
-
-# ---------------------------------------------------------------------------
-# 4. Perfiles T, S, F
-# ---------------------------------------------------------------------------
-
-def compute_T(A_ref: np.ndarray, y_ref: np.ndarray,
-              t_strength: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
-    """T con compresión opcional hacia 0.5.
-    
-    T = 0.5 + t_strength * (T_original - 0.5)
-    """
-    eps = 1e-9
-    mc = A_ref[y_ref == 1].mean(axis=0)
-    mh = A_ref[y_ref == 0].mean(axis=0)
-    delta = mc - mh
-    log2fc = np.log2((mc + eps) / (mh + eps))
-    T_orig = 0.5 + 0.5 * np.tanh(log2fc / 2.0)
-    T = 0.5 + t_strength * (T_orig - 0.5)
-    return T, delta
+    markers = pd.DataFrame(
+        {
+            "resistance_marker": resistance,
+            "virulence_marker": virulence,
+            "inflammation_marker": inflammation,
+            "metabolic_marker": metabolic,
+            "beneficial_marker": beneficial,
+        }
+    )
+    return F, markers
 
 
-def compute_taxon_direction(delta: np.ndarray) -> np.ndarray:
-    threshold = np.percentile(np.abs(delta), 70)
-    direction = np.array(["neutral"] * len(delta), dtype=object)
-    direction[delta > threshold] = "CRC_enriched"
-    direction[delta < -threshold] = "healthy_enriched"
-    return direction
-
-
-def compute_S(A_ref: np.ndarray, metadata: pd.DataFrame,
-              y_ref: np.ndarray | None = None,
-              t_strength: float = 1.0) -> np.ndarray:
-    """S orientado a riesgo poblacional, con residualización parcial.
-    
-    Elimina el 50% de la señal entre-grupos (T-proxy) de la abundancia
-    antes de correlacionar con metadata_risk. Así S retiene señal
-    independiente sin volverse proxy de T.
-    
-    metadata_risk = 0.65 * zscore(age) + 0.35 * zscore(bmi)
-    """
-    age = metadata["age"].to_numpy(float)
-    bmi = metadata["bmi"].to_numpy(float)
-    age_z = (age - age.mean()) / (age.std() + 1e-12)
-    bmi_z = (bmi - bmi.mean()) / (bmi.std() + 1e-12)
-    metadata_risk = 0.65 * age_z + 0.35 * bmi_z
-
-    # Residualización parcial: elimina 50% de la señal entre-grupos
-    A_partial = A_ref.copy()
-    if y_ref is not None:
-        for grp_val in np.unique(y_ref):
-            mask = y_ref == grp_val
-            if mask.sum() > 0:
-                grp_mean = A_ref[mask].mean(axis=0)
-                A_partial[mask] -= 0.50 * grp_mean  # solo 50%
-
-    n_items = A_ref.shape[1]
-    S_raw = np.zeros(n_items)
-    for i in range(n_items):
-        corr_i = np.corrcoef(A_partial[:, i], metadata_risk)[0, 1]
-        S_raw[i] = 0.5 + 0.5 * (corr_i if not np.isnan(corr_i) else 0.0)
-
-    if t_strength < 1.0:
-        S_raw = 0.5 + t_strength * (S_raw - 0.5)
-
-    return np.clip(S_raw, 0.0, 1.0)
-
-
-def build_item_mapping(n_items: int) -> pd.DataFrame:
-    rows = [{
-        "item_id": f"item_{i:03d}",
-        "taxon_name": f"Synthetic taxon {i:03d}",
-        "original_feature_id": f"synthetic_species_{i:03d}",
-        "rank": "species",
-    } for i in range(n_items)]
-    return pd.DataFrame(rows)
-
-
-# ---------------------------------------------------------------------------
-# 5. Construcción del dataset
-# ---------------------------------------------------------------------------
-
-def write_dataset(output_dir: Path, samples, metadata, A_eval,
-                  functional_matrix, item_profiles, item_mapping,
-                  profiles_TSF, manifest):
-    output_dir.mkdir(parents=True, exist_ok=True)
+def write_dataset(
+    output_dir: Path,
+    samples_eval: pd.DataFrame,
+    metadata_eval: pd.DataFrame,
+    A_eval: np.ndarray,
+    profiles_TSF: np.ndarray,
+    item_profiles: pd.DataFrame,
+    item_mapping: pd.DataFrame,
+    functional_matrix: pd.DataFrame,
+    manifest: dict[str, Any],
+) -> None:
     csv_dir = output_dir / "csv"
     npy_dir = output_dir / "npy"
-    csv_dir.mkdir(exist_ok=True)
-    npy_dir.mkdir(exist_ok=True)
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    npy_dir.mkdir(parents=True, exist_ok=True)
 
-    samples.to_csv(csv_dir / "samples.csv", index=False)
-    mA = pd.DataFrame(A_eval, columns=[f"item_{i:03d}" for i in range(A_eval.shape[1])])
-    mA.insert(0, "sample_id", samples["sample_id"].to_numpy())
-    mA.to_csv(csv_dir / "matrix_A.csv", index=False, float_format="%.9g")
-    metadata.to_csv(csv_dir / "metadata.csv", index=False)
+    item_ids = item_mapping["item_id"].to_list()
+
+    samples_eval.to_csv(csv_dir / "samples.csv", index=False)
+
+    matrix_df = pd.DataFrame(A_eval, columns=item_ids)
+    matrix_df.insert(0, "sample_id", samples_eval["sample_id"].to_numpy())
+    matrix_df.to_csv(csv_dir / "matrix_A.csv", index=False, float_format="%.9g")
+
+    metadata_eval.to_csv(csv_dir / "metadata.csv", index=False)
     functional_matrix.to_csv(csv_dir / "functional_matrix.csv", index=False)
     item_profiles.to_csv(csv_dir / "item_profiles.csv", index=False, float_format="%.9g")
     item_mapping.to_csv(csv_dir / "item_mapping.csv", index=False)
 
     np.save(npy_dir / "matrix_A.npy", A_eval.astype(np.float32))
-    np.save(npy_dir / "labels.npy", samples["label"].to_numpy(np.int32))
+    np.save(npy_dir / "labels.npy", samples_eval["label"].to_numpy(np.int32))
     np.save(npy_dir / "profiles_TSF.npy", profiles_TSF.astype(np.float32))
 
     with open(output_dir / "dataset_manifest.json", "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False)
 
 
-def build_one_dataset(
-    name: str,
-    n_eval_samples: int = DEFAULT_N_EVAL,
-    n_ref_samples: int = DEFAULT_N_REF,
-    n_items: int = DEFAULT_N_ITEMS,
-    seed: int = DEFAULT_SEED,
-    signal: float = DEFAULT_SIGNAL,
-    t_strength: float = DEFAULT_T_STRENGTH,
-    metadata_strength: float = DEFAULT_METADATA_STRENGTH,
-    functional_overlap: float = DEFAULT_FUNCTIONAL_OVERLAP,
-    output_root: Path = Path("data") / "processed",
-    verbose: bool = True,
-) -> Path:
-    if verbose:
-        print(f"\nGenerando '{name}' (eval={n_eval_samples} ref={n_ref_samples} "
-              f"items={n_items} signal={signal} t={t_strength} "
-              f"meta={metadata_strength} overlap={functional_overlap})")
+def mirror_to_data_root(output_dir: Path, data_root: Path) -> None:
+    """Opcional: copia salidas a data/csv, data/npy y data/dataset_manifest.json."""
+    src_csv = output_dir / "csv"
+    src_npy = output_dir / "npy"
+    dst_csv = data_root / "csv"
+    dst_npy = data_root / "npy"
 
-    rng = np.random.default_rng(seed)
+    if dst_csv.exists():
+        shutil.rmtree(dst_csv)
+    if dst_npy.exists():
+        shutil.rmtree(dst_npy)
 
-    # Generar ambas cohortes
-    samples_ref = generate_labels(n_ref_samples, rng)
-    labels_ref = samples_ref["label"].to_numpy(np.int32)
-    metadata_ref = generate_metadata(labels_ref, rng)
+    shutil.copytree(src_csv, dst_csv)
+    shutil.copytree(src_npy, dst_npy)
+    shutil.copy2(output_dir / "dataset_manifest.json", data_root / "dataset_manifest.json")
 
-    samples_eval = generate_labels(n_eval_samples, rng)
-    labels_eval = samples_eval["label"].to_numpy(np.int32)
-    metadata_eval = generate_metadata(labels_eval, rng)
 
-    item_groups = generate_item_groups(n_items, rng)
+def validate_dataset(A: np.ndarray, y: np.ndarray, profiles: np.ndarray, min_eval: int, n_items: int) -> dict[str, Any]:
+    row_sums = A.sum(axis=1)
+    validation = {
+        "A_shape": list(A.shape),
+        "labels_shape": list(y.shape),
+        "profiles_TSF_shape": list(profiles.shape),
+        "n_healthy": int((y == 0).sum()),
+        "n_crc": int((y == 1).sum()),
+        "row_sum_min": float(row_sums.min()),
+        "row_sum_max": float(row_sums.max()),
+        "profiles_min": float(profiles.min()),
+        "profiles_max": float(profiles.max()),
+        "A_nonnegative": bool(np.all(A >= 0)),
+        "profiles_in_unit_interval": bool(np.all((profiles >= 0) & (profiles <= 1))),
+        "rows_sum_to_one": bool(np.allclose(row_sums, 1.0, atol=1e-5)),
+        "balanced_labels": bool((y == 0).sum() == (y == 1).sum()),
+        "min_eval_ok": bool(A.shape[0] >= min_eval),
+        "n_items_ok": bool(A.shape[1] == n_items),
+    }
 
-    # Metadata risk score
-    age_all = np.concatenate([metadata_ref["age"].to_numpy(float),
-                              metadata_eval["age"].to_numpy(float)])
-    bmi_all = np.concatenate([metadata_ref["bmi"].to_numpy(float),
-                              metadata_eval["bmi"].to_numpy(float)])
-    age_z_all = (age_all - age_all.mean()) / (age_all.std() + 1e-12)
-    bmi_z_all = (bmi_all - bmi_all.mean()) / (bmi_all.std() + 1e-12)
-    metadata_risk_all = 0.65 * age_z_all + 0.35 * bmi_z_all
-    metadata_risk_ref = metadata_risk_all[:n_ref_samples]
-    metadata_risk_eval = metadata_risk_all[n_ref_samples:]
+    failed = [k for k, v in validation.items() if isinstance(v, bool) and not v]
+    if failed:
+        raise RuntimeError(f"Validación falló: {failed}. Detalle: {validation}")
 
-    # Efecto de metadata sobre TODOS los items (para que S comparta
-    # items con T y no sea puramente independiente)
-    item_metadata_effect = np.zeros(n_items, dtype=float)
-    n_meta_items = max(1, int(0.10 * n_items))  # 10% de todos los items
-    all_idx = np.arange(n_items)
-    meta_idx = rng.choice(all_idx, n_meta_items, replace=False)
-    half = n_meta_items // 2
-    item_metadata_effect[meta_idx[:half]] = 1.0
-    item_metadata_effect[meta_idx[half:2*half]] = -1.0
+    return validation
 
-    # Abundancia para T (SIN metadata_effect, para que T no capture señal de S)
-    A_ref_T = generate_abundance(labels_ref, item_groups, rng, signal)
-    # Abundancia para S (CON metadata_effect)
-    A_ref_S = generate_abundance(labels_ref, item_groups, rng, signal,
-                                  metadata_risk_ref, item_metadata_effect,
-                                  metadata_strength)
-    # Abundancia para EVAL (CON metadata_effect, para benchmark)
-    A_eval = generate_abundance(labels_eval, item_groups, rng, signal,
-                                 metadata_risk_eval, item_metadata_effect,
-                                 metadata_strength)
 
-    # Perfiles
-    T_profile, delta = compute_T(A_ref_T, labels_ref, t_strength)
-    S_profile = compute_S(A_ref_S, metadata_ref, y_ref=labels_ref, t_strength=t_strength)
-    functional_matrix = generate_functional_matrix(item_groups, rng, functional_overlap)
-    F_profile = compute_F(item_groups, rng, functional_overlap)
+def quick_eval(A: np.ndarray, y: np.ndarray, profiles: np.ndarray, rng: np.random.Generator, k: int) -> dict[str, Any]:
+    def eval_w(w: np.ndarray) -> float:
+        P = profiles @ w
+        scores = A @ P
+        return auc_rank(y, scores)
 
-    taxon_direction = compute_taxon_direction(delta)
-    n_neutral = int((taxon_direction == "neutral").sum())
+    result: dict[str, Any] = {
+        "T_only_auc": eval_w(np.array([1.0, 0.0, 0.0], dtype=np.float32)),
+        "S_only_auc": eval_w(np.array([0.0, 1.0, 0.0], dtype=np.float32)),
+        "F_only_auc": eval_w(np.array([0.0, 0.0, 1.0], dtype=np.float32)),
+        "equal_auc": eval_w(np.array([1 / 3, 1 / 3, 1 / 3], dtype=np.float32)),
+    }
 
-    item_ids = [f"item_{i:03d}" for i in range(n_items)]
-    taxon_names = [f"Synthetic taxon {i:03d}" for i in range(n_items)]
-    item_profiles = pd.DataFrame({
-        "item_id": item_ids,
-        "taxon_name": taxon_names,
-        "T": T_profile,
-        "taxon_direction": taxon_direction,
-        "S": S_profile,
-        "F": F_profile,
-    })
+    if k <= 0:
+        result["best_auc"] = None
+        result["best_w"] = None
+        return result
 
-    profiles_TSF = np.column_stack([T_profile, S_profile, F_profile]).astype(np.float32)
+    best_auc = -1.0
+    best_w = None
 
-    assert np.all(profiles_TSF >= 0) and np.all(profiles_TSF <= 1)
+    # Dirichlet sobre el simplex: W_i > 0 y sum(W)=1.
+    weights = rng.dirichlet(np.ones(3, dtype=np.float64), size=k).astype(np.float32)
+    for w in weights:
+        auc = eval_w(w)
+        if auc > best_auc:
+            best_auc = auc
+            best_w = w.copy()
 
-    if verbose:
-        print(f"    taxon_direction: CRC={(taxon_direction=='CRC_enriched').sum()}, "
-              f"healthy={(taxon_direction=='healthy_enriched').sum()}, "
-              f"neutral={n_neutral}")
+    result["best_auc"] = float(best_auc)
+    result["best_w"] = [float(x) for x in best_w]
+    return result
 
-    item_mapping = build_item_mapping(n_items)
-    n_crc_enc = max(1, int(round(CRC_ENRICHED_FRACTION * n_items)))
-    n_health_enc = max(1, int(round(HEALTHY_ENRICHED_FRACTION * n_items)))
-    up_f, down_f = _signal_factors(signal)
 
-    manifest = {
-        "dataset_name": name,
-        "dataset_type": "synthetic-compatible",
+def build_dataset(args: argparse.Namespace) -> Path:
+    require_even_positive("n_eval", args.n_eval)
+    require_even_positive("n_ref", args.n_ref)
+
+    if args.n_eval < 2000 and not args.allow_small:
+        raise ValueError(
+            f"Este generador está configurado para mínimo 2000 muestras EVAL. "
+            f"Recibido --n-eval {args.n_eval}. Usa --allow-small solo para pruebas."
+        )
+
+    rng = np.random.default_rng(args.seed)
+
+    samples_ref = generate_labels(args.n_ref, "REF", rng)
+    samples_eval = generate_labels(args.n_eval, "EVAL", rng)
+
+    y_ref = samples_ref["label"].to_numpy(np.int32)
+    y_eval = samples_eval["label"].to_numpy(np.int32)
+
+    metadata_ref = generate_metadata(samples_ref, rng)
+    metadata_eval = generate_metadata(samples_eval, rng)
+
+    metadata_risk_ref = metadata_risk_from_metadata(metadata_ref)
+    metadata_risk_eval = metadata_risk_from_metadata(metadata_eval)
+
+    item_groups = generate_item_groups(args.n_items, rng)
+    taxon_names = generate_taxon_names(item_groups, rng)
+    metadata_effect = build_metadata_effects(item_groups, rng, args.metadata_fraction)
+
+    A_ref = generate_abundance(
+        labels=y_ref,
+        item_groups=item_groups,
+        metadata_risk=metadata_risk_ref,
+        metadata_effect=metadata_effect,
+        rng=rng,
+        signal=args.signal,
+        metadata_strength=args.metadata_strength,
+        zero_inflation=args.zero_inflation,
+        noise_sigma=args.noise_sigma,
+    )
+
+    A_eval = generate_abundance(
+        labels=y_eval,
+        item_groups=item_groups,
+        metadata_risk=metadata_risk_eval,
+        metadata_effect=metadata_effect,
+        rng=rng,
+        signal=args.signal,
+        metadata_strength=args.metadata_strength,
+        zero_inflation=args.zero_inflation,
+        noise_sigma=args.noise_sigma,
+    )
+
+    T, taxon_direction_estimated, log2fc_ref = compute_T(A_ref, y_ref, args.t_strength)
+    S = compute_S(A_ref, metadata_risk_ref)
+    F, marker_values = compute_F(item_groups, taxon_names, rng, args.functional_overlap)
+
+    profiles_TSF = np.vstack([T, S, F]).T.astype(np.float32)
+
+    item_ids = [f"item_{i:03d}" for i in range(args.n_items)]
+
+    samples_eval_out = samples_eval.copy()
+    metadata_eval_out = metadata_eval.copy()
+
+    item_mapping = pd.DataFrame(
+        {
+            "item_id": item_ids,
+            "taxon_name": taxon_names,
+            "original_feature_id": [f"synthetic_feature_{i:03d}" for i in range(args.n_items)],
+            "rank": "species",
+            "true_group": item_groups,
+            "metadata_effect": metadata_effect.astype(np.float32),
+            "log2fc_ref": log2fc_ref,
+        }
+    )
+
+    functional_matrix = pd.concat(
+        [pd.DataFrame({"item_id": item_ids}), marker_values],
+        axis=1,
+    )
+
+    item_profiles = pd.DataFrame(
+        {
+            "item_id": item_ids,
+            "taxon_name": taxon_names,
+            "T": profiles_TSF[:, 0],
+            "taxon_direction": taxon_direction_estimated,
+            "true_group": item_groups,
+            "S": profiles_TSF[:, 1],
+            "F": profiles_TSF[:, 2],
+        }
+    )
+
+    validation = validate_dataset(A_eval, y_eval, profiles_TSF, min_eval=args.n_eval, n_items=args.n_items)
+    qe = quick_eval(A_eval, y_eval, profiles_TSF, rng, args.quick_k)
+
+    dataset_name = args.name
+    if dataset_name == "auto":
+        dataset_name = f"synthetic_CRC{args.n_eval}x{args.n_items}_balanced"
+
+    output_dir = args.out_dir / dataset_name
+
+    manifest: dict[str, Any] = {
+        "dataset_name": dataset_name,
+        "dataset_type": "synthetic-compatible-scaled",
         "disease_task": "colorectal_cancer_vs_healthy",
         "positive_class": "CRC",
         "negative_class": "healthy/control",
-        "seed": seed,
-        "signal": signal,
-        "t_strength": t_strength,
-        "metadata_strength": metadata_strength,
-        "functional_overlap": functional_overlap,
-        "n_eval_samples": n_eval_samples,
-        "n_eval_healthy": n_eval_samples // 2,
-        "n_eval_crc": n_eval_samples - n_eval_samples // 2,
-        "n_ref_samples": n_ref_samples,
-        "n_ref_healthy": n_ref_samples // 2,
-        "n_ref_crc": n_ref_samples - n_ref_samples // 2,
-        "n_items": n_items,
-        "n_crc_enriched": n_crc_enc,
-        "n_healthy_enriched": n_health_enc,
-        "abundance_type": "relative_abundance",
-        "abundance_signal": f"up={up_f:.4f}, down={down_f:.4f}",
-        "abundance_noise": "lognormal(mean=0.0, sigma=0.35)",
-        "T_formula": f"0.5 + {t_strength} * (T_original - 0.5)",
-        "T_source": "estimated from independent reference cohort (A_ref, y_ref)",
-        "S_formula": "0.5 + 0.5 * corr(abundance, 0.65*age_z + 0.35*bmi_z)",
-        "S_source": "estimated from reference cohort, metadata_risk-oriented (not abs)",
-        "F_formula": "direct from item group + noise (not from Bernoulli markers)",
-        "F_source": "computed from item group with controlled overlap",
-        "taxon_direction_method": "percentile 70 of |delta|",
-        "reference_split_note": "T and S from independent ref cohort. "
-                                 "Prevents label leakage.",
+        "seed": args.seed,
+        "n_eval_samples": int(args.n_eval),
+        "n_eval_healthy": int((y_eval == 0).sum()),
+        "n_eval_crc": int((y_eval == 1).sum()),
+        "n_ref_samples": int(args.n_ref),
+        "n_ref_healthy": int((y_ref == 0).sum()),
+        "n_ref_crc": int((y_ref == 1).sum()),
+        "n_items": int(args.n_items),
+        "n_crc_enriched_true": int((item_groups == "CRC_enriched").sum()),
+        "n_healthy_enriched_true": int((item_groups == "healthy_enriched").sum()),
+        "n_neutral_true": int((item_groups == "neutral").sum()),
+        "signal": float(args.signal),
+        "t_strength": float(args.t_strength),
+        "metadata_strength": float(args.metadata_strength),
+        "metadata_fraction": float(args.metadata_fraction),
+        "functional_overlap": float(args.functional_overlap),
+        "zero_inflation": float(args.zero_inflation),
+        "noise_sigma": float(args.noise_sigma),
+        "abundance_type": "relative_abundance_synthetic",
+        "abundance_model": "gamma base abundance + lognormal sample noise + class factor + metadata factor + row normalization",
+        "T_formula": "T = clip(0.5 + t_strength * ((0.5 + 0.5*tanh(log2fc_ref/2)) - 0.5), 0, 1)",
+        "T_source": "estimated from independent REF cohort only",
+        "S_formula": "S = 0.5 + 0.5*corr(A_ref[:, i], metadata_risk_ref)",
+        "S_source": "estimated from REF metadata only; disease label not used",
+        "F_formula": "controlled functional proxy from item group with functional_overlap",
+        "F_source": "synthetic functional markers with controlled overlap",
+        "reference_split_note": "T and S are computed from REF. EVAL is exported for benchmark to avoid label leakage.",
+        "validation": validation,
+        "quick_eval": qe,
     }
 
-    write_dataset(output_root / name, samples_eval, metadata_eval, A_eval,
-                  functional_matrix, item_profiles, item_mapping,
-                  profiles_TSF, manifest)
+    write_dataset(
+        output_dir=output_dir,
+        samples_eval=samples_eval_out,
+        metadata_eval=metadata_eval_out,
+        A_eval=A_eval,
+        profiles_TSF=profiles_TSF,
+        item_profiles=item_profiles,
+        item_mapping=item_mapping,
+        functional_matrix=functional_matrix,
+        manifest=manifest,
+    )
 
-    if verbose:
-        print(f"  OK -> {output_root / name}/")
-    return output_root / name
+    if args.write_root_copy:
+        mirror_to_data_root(output_dir, Path("data"))
 
+    print(f"Dataset generado: {output_dir}")
+    print(f"A_eval: {A_eval.shape} {A_eval.dtype}")
+    print(
+        f"labels: {y_eval.shape} healthy={int((y_eval == 0).sum())} "
+        f"CRC={int((y_eval == 1).sum())}"
+    )
+    print(f"profiles_TSF: {profiles_TSF.shape} {profiles_TSF.dtype}")
+    print(f"row_sum_min={validation['row_sum_min']:.8f} row_sum_max={validation['row_sum_max']:.8f}")
+    print(
+        "AUC sanity: "
+        f"T={qe['T_only_auc']:.4f} "
+        f"S={qe['S_only_auc']:.4f} "
+        f"F={qe['F_only_auc']:.4f} "
+        f"equal={qe['equal_auc']:.4f} "
+        f"best={qe['best_auc'] if qe['best_auc'] is not None else 'NA'}"
+    )
+    if qe["best_w"] is not None:
+        print("best_w:", " ".join(f"{x:.4f}" for x in qe["best_w"]))
 
-# ---------------------------------------------------------------------------
-# 6. Evaluación rápida (para grid)
-# ---------------------------------------------------------------------------
+    if args.write_root_copy:
+        print("Copia legacy escrita en data/csv, data/npy y data/dataset_manifest.json")
 
-def quick_eval(data_dir: Path, k: int = 5000, seed: int = 42) -> dict:
-    """Evalúa dataset y retorna métricas.
-    
-    No modifica archivos. Usa k=5000 para diagnóstico rápido.
-    """
-    sys.path.insert(0, str(Path("python").resolve()))
-    from common import load_data, evaluate, random_search
-    from scipy.stats import pearsonr
-
-    A, y, profiles = load_data(data_dir)
-    T, S, F = profiles[:, 0], profiles[:, 1], profiles[:, 2]
-
-    res = {}
-    for name, w in [("T_only", [1,0,0]), ("S_only", [0,1,0]),
-                     ("F_only", [0,0,1]), ("equal", [1/3,1/3,1/3])]:
-        auc_v, cons_v = evaluate(A, y, profiles, np.array(w))
-        res[name] = (auc_v, cons_v)
-
-    best_auc, best_cons, best_w = random_search(A, y, profiles, k, seed)
-    res["best"] = (best_auc, best_cons)
-    res["best_w"] = best_w
-
-    res["corr_TF"] = pearsonr(T, F)[0]
-    res["corr_TS"] = pearsonr(T, S)[0]
-    res["corr_SF"] = pearsonr(S, F)[0]
-
-    # signal=0 test
-    rng0 = np.random.default_rng(seed)
-    lab0 = generate_labels(300, rng0)["label"].to_numpy(np.int32)
-    grp0 = generate_item_groups(500, rng0)
-    A0 = generate_abundance(lab0, grp0, rng0, 0.0)
-    idx_p = rng0.permutation(300)
-    T0, _ = compute_T(A0[idx_p[:200]], lab0[idx_p[:200]], 1.0)
-    F0 = compute_F(grp0, rng0, 0.40)
-    meta0 = generate_metadata(lab0[idx_p[:200]], rng0)
-    S0 = compute_S(A0[idx_p[:200]], meta0, y_ref=lab0[idx_p[:200]], t_strength=1.0)
-    p0 = np.column_stack([T0, S0, F0]).astype(np.float32)
-    sig0_t, _ = evaluate(A0[idx_p[200:]], lab0[idx_p[200:]], p0, np.array([1,0,0]))
-    res["signal0_T"] = sig0_t
-
-    # neutral count
-    import pandas as pd
-    ip = pd.read_csv(data_dir / "csv" / "item_profiles.csv")
-    res["neutral_pct"] = 100 * (ip["taxon_direction"] == "neutral").sum() / len(ip)
-
-    return res
+    return output_dir
 
 
-# ---------------------------------------------------------------------------
-# Grid de hiperparámetros
-# ---------------------------------------------------------------------------
-
-def run_grid(output_root: Path = Path("data") / "grid",
-             k: int = 5000, seed: int = 42) -> list[dict]:
-    """Barrido pequeño de t_strength × metadata_strength × functional_overlap."""
-    t_strengths = [0.80, 0.90, 1.00]
-    meta_strengths = [0.00, 0.15, 0.30]
-    overlaps = [0.30, 0.40, 0.50]
-
-    results = []
-    total = len(t_strengths) * len(meta_strengths) * len(overlaps)
-    idx = 0
-
-    for ts in t_strengths:
-        for ms in meta_strengths:
-            for ov in overlaps:
-                idx += 1
-                name = f"ts{ts:.2f}_ms{ms:.2f}_ov{ov:.2f}"
-                print(f"\n[{idx}/{total}] {name}")
-                try:
-                    d = build_one_dataset(name, n_eval_samples=100, n_ref_samples=200,
-                                          n_items=500, seed=seed, signal=1.0,
-                                          t_strength=ts, metadata_strength=ms,
-                                          functional_overlap=ov,
-                                          output_root=output_root, verbose=False)
-                    r = quick_eval(d, k=k, seed=seed)
-                    r["t_strength"] = ts
-                    r["metadata_strength"] = ms
-                    r["functional_overlap"] = ov
-                    results.append(r)
-
-                    print(f"  T={r['T_only'][0]:.4f} S={r['S_only'][0]:.4f} "
-                          f"F={r['F_only'][0]:.4f} equal={r['equal'][0]:.4f} "
-                          f"best={r['best'][0]:.4f} w=[{r['best_w'][0]:.4f} "
-                          f"{r['best_w'][1]:.4f} {r['best_w'][2]:.4f}] "
-                          f"corrTF={r['corr_TF']:.4f} sig0={r['signal0_T']:.4f} "
-                          f"neut={r['neutral_pct']:.0f}%")
-                except Exception as e:
-                    print(f"  ERROR: {e}")
-
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Punto de entrada
-# ---------------------------------------------------------------------------
-
-def main():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Genera dataset con perfiles T,S,F calibrados")
-    parser.add_argument("--name", type=str, default="benchmark")
+        description="Genera dataset sintético-compatible escalado para scoring metagenómico HPC."
+    )
+    parser.add_argument("--name", type=str, default="auto")
     parser.add_argument("--n-eval", type=int, default=DEFAULT_N_EVAL)
     parser.add_argument("--n-ref", type=int, default=DEFAULT_N_REF)
     parser.add_argument("--n-items", type=int, default=DEFAULT_N_ITEMS)
@@ -615,45 +759,20 @@ def main():
     parser.add_argument("--signal", type=float, default=DEFAULT_SIGNAL)
     parser.add_argument("--t-strength", type=float, default=DEFAULT_T_STRENGTH)
     parser.add_argument("--metadata-strength", type=float, default=DEFAULT_METADATA_STRENGTH)
+    parser.add_argument("--metadata-fraction", type=float, default=DEFAULT_METADATA_FRACTION)
     parser.add_argument("--functional-overlap", type=float, default=DEFAULT_FUNCTIONAL_OVERLAP)
+    parser.add_argument("--zero-inflation", type=float, default=DEFAULT_ZERO_INFLATION)
+    parser.add_argument("--noise-sigma", type=float, default=DEFAULT_NOISE_SIGMA)
     parser.add_argument("--out-dir", type=Path, default=Path("data") / "processed")
-    parser.add_argument("--grid", action="store_true",
-                        help="Ejecutar grid de hiperparámetros")
-    parser.add_argument("--k", type=int, default=5000,
-                        help="K para random search en grid")
-    args = parser.parse_args()
+    parser.add_argument("--quick-k", type=int, default=500, help="K de random search para sanity check; 0 lo desactiva.")
+    parser.add_argument("--allow-small", action="store_true", help="Permite n-eval < 2000 solo para pruebas.")
+    parser.add_argument("--write-root-copy", action="store_true", help="Copia también a data/csv, data/npy y data/dataset_manifest.json.")
+    return parser.parse_args()
 
-    if args.grid:
-        results = run_grid(output_root=args.out_dir, k=args.k, seed=args.seed)
-        print("\n\n=== GRID RESULTS ===")
-        print("ts,ms,ov,T_only,S_only,F_only,equal,best,wT,wS,wF,corrTF,sig0T,neut%")
-        for r in results:
-            print(f"{r['t_strength']:.2f},{r['metadata_strength']:.2f},"
-                  f"{r['functional_overlap']:.2f},"
-                  f"{r['T_only'][0]:.4f},{r['S_only'][0]:.4f},"
-                  f"{r['F_only'][0]:.4f},{r['equal'][0]:.4f},"
-                  f"{r['best'][0]:.4f},{r['best_w'][0]:.4f},"
-                  f"{r['best_w'][1]:.4f},{r['best_w'][2]:.4f},"
-                  f"{r['corr_TF']:.4f},{r['signal0_T']:.4f},"
-                  f"{r['neutral_pct']:.0f}")
-    else:
-        d = build_one_dataset(args.name,
-                               n_eval_samples=args.n_eval,
-                               n_ref_samples=args.n_ref,
-                               n_items=args.n_items,
-                               seed=args.seed,
-                               signal=args.signal,
-                               t_strength=args.t_strength,
-                               metadata_strength=args.metadata_strength,
-                               functional_overlap=args.functional_overlap,
-                               output_root=args.out_dir)
-        r = quick_eval(d, k=5000, seed=args.seed)
-        print(f"\n  T_only={r['T_only'][0]:.4f}  S_only={r['S_only'][0]:.4f}  "
-              f"F_only={r['F_only'][0]:.4f}")
-        print(f"  equal={r['equal'][0]:.4f}  best={r['best'][0]:.4f}  "
-              f"w=[{r['best_w'][0]:.4f} {r['best_w'][1]:.4f} {r['best_w'][2]:.4f}]")
-        print(f"  corr(T,F)={r['corr_TF']:.4f}  signal=0 T={r['signal0_T']:.4f}  "
-              f"neutral={r['neutral_pct']:.0f}%")
+
+def main() -> None:
+    args = parse_args()
+    build_dataset(args)
 
 
 if __name__ == "__main__":

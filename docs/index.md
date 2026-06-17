@@ -2,7 +2,7 @@
 
 Este directorio concentra la documentación operativa del proyecto. El archivo contractual completo está en [`../PROJECT.md`](../PROJECT.md). Si una decisión técnica contradice `PROJECT.md`, la decisión está mal salvo que esté marcada como supuesto explícito.
 
-> 🏗️ **Scaffold parcial:** `C_OpenMP_MPI/scoring_openmp.c` está implementado (3 estrategias OpenMP). `C_OpenMP_MPI/scoring_mpi.c`, `CUDA/` y `scripts/` son esqueleto con TODO.
+> 🏗️ **Scaffold parcial:** `python/` y `C_OpenMP_MPI/scoring_openmp.c` están implementados (3 estrategias Python + 3 OpenMP). `C_OpenMP_MPI/scoring_mpi.c`, `CUDA/` y `scripts/` son esqueleto con TODO.
 
 ## Guías
 
