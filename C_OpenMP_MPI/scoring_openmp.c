@@ -78,7 +78,7 @@ typedef struct {
  * Cada hilo:
  *   - RNG propio: pcg64_seed(pcg, seed + tid)
  *   - Acumula solo mejor local (sin compartir nada durante el loop)
- *   - Merge local→global vía #pragma omp critical post-loop
+ *   - Merge local→global vía merge serial post-loop (sin contención)
  *   - Reporta su mejor local al final
  *
  * @param ds      Dataset (A, profiles, y).
@@ -132,14 +132,12 @@ static Best random_search_openmp(const Dataset *ds, long k, uint64_t seed,
         long chunk_base = k / n_threads;
         int  extra      = (int)(k % n_threads);
         threads[tid].chunk_size = (int)chunk_base + (tid < extra ? 1 : 0);
-
-        #pragma omp barrier
-
-        /* Merge local → global (por si nunca ganó el critical race) */
-        #pragma omp critical
-        if (local_best.auc > global_best.auc)
-            global_best = local_best;
     }
+
+    /* Merge serial post-loop — sin contención */
+    for (int t = 0; t < n_threads; t++)
+        if (threads[t].best.auc > global_best.auc)
+            global_best = threads[t].best;
 
     /* Reportar worker results (hilo master) */
     if (verbose && threads) {
@@ -232,13 +230,12 @@ static Best grid_search_openmp(const Dataset *ds, double step,
         long chunk_base = total / n_threads;
         int  extra      = (int)(total % n_threads);
         threads[tid].chunk_size = (int)chunk_base + (tid < extra ? 1 : 0);
-
-        #pragma omp barrier
-
-        #pragma omp critical
-        if (local_best.auc > global_best.auc)
-            global_best = local_best;
     }
+
+    /* Merge serial post-loop — sin contención */
+    for (int t = 0; t < n_threads; t++)
+        if (threads[t].best.auc > global_best.auc)
+            global_best = threads[t].best;
 
     /* Reportar workers */
     if (verbose && threads) {
@@ -331,13 +328,12 @@ static Best hybrid_search_openmp(const Dataset *ds, long k, uint64_t seed,
             long chunk_base = random_n / rnd_n_threads;
             int  extra      = (int)(random_n % rnd_n_threads);
             rnd_threads[tid].chunk_size = (int)chunk_base + (tid < extra ? 1 : 0);
-
-            #pragma omp barrier
-
-            #pragma omp critical
-            if (local_best.auc > global_best.auc)
-                global_best = local_best;
         }
+
+        /* Merge serial post-loop — sin contención */
+        for (int t = 0; t < rnd_n_threads; t++)
+            if (rnd_threads[t].best.auc > global_best.auc)
+                global_best = rnd_threads[t].best;
 
         if (verbose && rnd_threads) {
             printf("\n  --- best by worker (random phase) ---\n");
@@ -407,13 +403,12 @@ static Best hybrid_search_openmp(const Dataset *ds, long k, uint64_t seed,
                 long chunk_base = count / loc_n_threads;
                 int  extra      = (int)(count % loc_n_threads);
                 loc_threads[tid].chunk_size = (int)chunk_base + (tid < extra ? 1 : 0);
-
-                #pragma omp barrier
-
-                #pragma omp critical
-                if (local_best.auc > global_best.auc)
-                    global_best = local_best;
             }
+
+            /* Merge serial post-loop — sin contención */
+            for (int t = 0; t < loc_n_threads; t++)
+                if (loc_threads[t].best.auc > global_best.auc)
+                    global_best = loc_threads[t].best;
 
             if (verbose && loc_threads) {
                 printf("\n  --- best by worker (local conc=%.0f) ---\n", concs[ph]);

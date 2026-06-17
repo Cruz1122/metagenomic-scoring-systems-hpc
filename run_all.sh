@@ -9,13 +9,28 @@ SEED="${SEED:-42}"
 WORKERS_LIST="${WORKERS_LIST:-2 4}"
 THREADS_LIST="${THREADS_LIST:-1 2 4}"
 MPI_RANKS_LIST="${MPI_RANKS_LIST:-2 4}"
-DATA_DIR="${DATA_DIR:-data}"
+# Dataset: 100 | 2000 (default)
+DATASET_SIZE="${DATASET_SIZE:-2000}"
+if [ "$DATASET_SIZE" = "100" ]; then
+    DATA_DIR="${DATA_DIR:-data/processed/synthetic_CRC100x500_balanced}"
+elif [ "$DATASET_SIZE" = "2000" ]; then
+    DATA_DIR="${DATA_DIR:-data}"
+else
+    echo "ERROR: DATASET_SIZE must be 100 or 2000" >&2
+    exit 1
+fi
 RAW="results/benchmark_raw.csv"
 OUT="results/benchmark.csv"
 mkdir -p results results/plots
 
-# 1. Generar datos sintéticos
-python data/scripts/generate_data.py --seed "$SEED"
+# 1. Generar datos sintéticos (si no existen)
+if [ "$DATASET_SIZE" = "100" ] && [ ! -f "$DATA_DIR/dataset_manifest.json" ]; then
+    python data/scripts/generate_dataset.py --name "synthetic_CRC100x500_balanced" \
+        --n-eval 100 --n-ref 200 --seed "$SEED" --allow-small
+elif [ "$DATASET_SIZE" = "2000" ] && [ ! -f "data/processed/synthetic_CRC2000x500_balanced/dataset_manifest.json" ]; then
+    python data/scripts/generate_dataset.py --name "synthetic_CRC2000x500_balanced" \
+        --n-eval 2000 --n-ref 1000 --seed "$SEED"
+fi
 
 # 2. Benchmark header
 echo "implementation,parallel_units,n_items,k,time_sec,auc,consistency,w1,w2,w3,seed,search_mode,iterations_until_best" > "$RAW"

@@ -1,30 +1,42 @@
 SHELL := /bin/bash
 N_ITEMS ?= 500
 SEED ?= 42
-K ?= 10000
+K ?= 20000
 WORKERS ?= 4
 THETA ?=
 THREADS ?= 4
 MPI_RANKS ?= 4
-DATA_DIR ?= data
-MPICC ?= cl
-MPICFLAGS ?= /O2 /std:c11 /I"C:/Program Files (x86)/Microsoft SDKs/MPI/Include"
-MPILDFLAGS ?= "C:/Program Files (x86)/Microsoft SDKs/MPI/Lib/x64/msmpi.lib" /link
+DATASET_SIZE ?= 2000
+DATA_DIR ?= $(shell if [ "$(DATASET_SIZE)" = "100" ]; then echo "data/processed/synthetic_CRC100x500_balanced"; else echo "data"; fi)
 
 .PHONY: help data python-seq python-mp python-mp-grid python-mp-hybrid c openmp-run mpi-run cuda cuda-run pycuda-run benchmark plots clean
 
 help:
-	@echo "make data                -> python data/scripts/generate_data.py"
-	@echo "make python-seq K=10000"
-	@echo "make python-mp K=10000 WORKERS=4"
-	@echo "make python-mp-grid K=10000 WORKERS=4"
-	@echo "make python-mp-hybrid K=5000 WORKERS=4"
-	@echo "make c | make openmp-run | make mpi-run"
-	@echo "make cuda | make cuda-run | make pycuda-run"
+	@echo "make data | make data-100   -> generate datasets (2000 | 100 samples)"
+	@echo "make python-seq K=10000     -> sequential random (default)"
+	@echo "make python-seq-grid        -> sequential grid search"
+	@echo "make python-seq-hybrid      -> sequential hybrid search"
+	@echo "make python-mp K=10000 WORKERS=4   -> multicore random"
+	@echo "make python-mp-grid         -> multicore grid search"
+	@echo "make python-mp-hybrid       -> multicore hybrid search"
+	@echo "make c                      -> compile all C binaries"
+	@echo "make seq-run                -> C sequential baseline"
+	@echo "make openmp-run             -> C/OpenMP (set OMP_NUM_THREADS)"
+	@echo "make mpi-run                -> C/MPI (scaffold)"
+	@echo "make cuda | make cuda-run   -> CUDA C (scaffold)"
+	@echo "make pycuda-run             -> PyCUDA (scaffold)"
 	@echo "make benchmark | make plots | make clean"
+	@echo ""
+	@echo "Dataset selection: DATASET_SIZE=100 (100 samples) or 2000 (default)"
+
+data-100:
+	python data/scripts/generate_dataset.py --name synthetic_CRC100x500_balanced \
+		--n-eval 100 --n-ref 200 --seed $(SEED) --allow-small
+
+data-2000: data
 
 data:
-	python data/scripts/generate_data.py --seed $(SEED)
+	python data/scripts/generate_dataset.py --seed $(SEED)
 
 python-seq:
 	python python/sequential.py --k $(K) --seed $(SEED) --data-dir $(DATA_DIR) --search random
@@ -75,5 +87,5 @@ clean:
 	$(MAKE) -C C_OpenMP_MPI clean || true
 	$(MAKE) -C CUDA clean || true
 	rm -f results/benchmark.csv results/benchmark_raw.csv results/plots/*.png
-	rm -rf data/npy/ data/csv/ data/dataset_manifest.json
-
+	# Nota: data/npy/, data/csv/, data/dataset_manifest.json son symlinks,
+	# no se borran. Para regenerar datasets usa 'make data'.

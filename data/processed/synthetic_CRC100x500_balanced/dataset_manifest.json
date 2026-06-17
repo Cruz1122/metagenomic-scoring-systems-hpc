@@ -1,0 +1,71 @@
+{
+  "dataset_name": "synthetic_CRC100x500_balanced",
+  "dataset_type": "synthetic-compatible-scaled",
+  "disease_task": "colorectal_cancer_vs_healthy",
+  "positive_class": "CRC",
+  "negative_class": "healthy/control",
+  "seed": 42,
+  "n_eval_samples": 100,
+  "n_eval_healthy": 50,
+  "n_eval_crc": 50,
+  "n_ref_samples": 200,
+  "n_ref_healthy": 100,
+  "n_ref_crc": 100,
+  "n_items": 500,
+  "n_crc_enriched_true": 40,
+  "n_healthy_enriched_true": 40,
+  "n_neutral_true": 420,
+  "signal": 0.45,
+  "t_strength": 0.85,
+  "metadata_strength": 0.08,
+  "metadata_fraction": 0.22,
+  "functional_overlap": 0.3,
+  "zero_inflation": 0.08,
+  "noise_sigma": 0.35,
+  "abundance_type": "relative_abundance_synthetic",
+  "abundance_model": "gamma base abundance + lognormal sample noise + class factor + metadata factor + row normalization",
+  "T_formula": "T = clip(0.5 + t_strength * ((0.5 + 0.5*tanh(log2fc_ref/2)) - 0.5), 0, 1)",
+  "T_source": "estimated from independent REF cohort only",
+  "S_formula": "S = 0.5 + 0.5*corr(A_ref[:, i], metadata_risk_ref)",
+  "S_source": "estimated from REF metadata only; disease label not used",
+  "F_formula": "controlled functional proxy from item group with functional_overlap",
+  "F_source": "synthetic functional markers with controlled overlap",
+  "reference_split_note": "T and S are computed from REF. EVAL is exported for benchmark to avoid label leakage.",
+  "validation": {
+    "A_shape": [
+      100,
+      500
+    ],
+    "labels_shape": [
+      100
+    ],
+    "profiles_TSF_shape": [
+      500,
+      3
+    ],
+    "n_healthy": 50,
+    "n_crc": 50,
+    "row_sum_min": 0.9999999403953552,
+    "row_sum_max": 1.0,
+    "profiles_min": 0.1562073677778244,
+    "profiles_max": 0.8586362600326538,
+    "A_nonnegative": true,
+    "profiles_in_unit_interval": true,
+    "rows_sum_to_one": true,
+    "balanced_labels": true,
+    "min_eval_ok": true,
+    "n_items_ok": true
+  },
+  "quick_eval": {
+    "T_only_auc": 0.7316,
+    "S_only_auc": 0.6176,
+    "F_only_auc": 0.7812,
+    "equal_auc": 0.8316,
+    "best_auc": 0.8376,
+    "best_w": [
+      0.2714603543281555,
+      0.49115607142448425,
+      0.23738358914852142
+    ]
+  }
+}

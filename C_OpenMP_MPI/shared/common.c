@@ -198,10 +198,10 @@ static int* load_csv_labels(const char *path, int *n) {
  * @brief Carga item_profiles.csv → double* row-major (T, S, F).
  *
  * Formato:
- *   item_id,taxon_name,T,taxon_direction,S,F   (header)
- *   item_000,Synthetic taxon 000,0.581010,CRC_enriched,0.443418,0.475849
+ *   item_id,taxon_name,T,taxon_direction,true_group,S,F   (header)
+ *   item_000,Synthetic taxon 000,0.581010,neutral,neutral,0.443418,0.475849
  *
- * Extrae columnas 2 (T), 4 (S), 5 (F).
+ * Extrae columnas 2 (T), 5 (S), 6 (F).
  * Asume que ningún campo contiene comas incrustadas.
  */
 static double* load_csv_profiles(const char *path, int *rows, int *cols) {
@@ -230,9 +230,9 @@ static double* load_csv_profiles(const char *path, int *rows, int *cols) {
         if (!fgets(line, sizeof(line), fh)) {
             free(out); fclose(fh); return NULL;
         }
-        out[r * 3 + 0] = csv_double(line, 2); /* T */
-        out[r * 3 + 1] = csv_double(line, 4); /* S */
-        out[r * 3 + 2] = csv_double(line, 5); /* F */
+        out[r * 3 + 0] = csv_double(line, 2); /* T (col 2) */
+        out[r * 3 + 1] = csv_double(line, 5); /* S (col 5) */
+        out[r * 3 + 2] = csv_double(line, 6); /* F (col 6) */
     }
 
     fclose(fh);
