@@ -30,7 +30,7 @@ typedef double real;
 typedef float real;
 #endif
 
-#define MAX_SAMPLES 1024
+#define MAX_SAMPLES 4096
 #define MAX_ITEMS 1000000
 
 #define CUDA_CHECK(x) do { \
@@ -91,6 +91,13 @@ static void read_npy_float32(const char* path, std::vector<float>& data, int& d0
     int64_t nelem=1; for (auto s:shape) nelem*=s;
     if (shape.empty()) { d0=0; d1=0; return; }
 
+    // Detect fortran_order
+    bool fortran = false;
+    {
+        std::string fk = find_key("fortran_order");
+        if (fk == "True" || fk == "True," || fk == "1") fortran = true;
+    }
+
     int64_t offset = 6+1+1+(vmaj==1?2:4)+hdr_len;
     f.seekg(offset);
 
@@ -100,6 +107,16 @@ static void read_npy_float32(const char* path, std::vector<float>& data, int& d0
         data.resize(nelem); for (int64_t i=0;i<nelem;i++) data[i]=(float)tmp[i];
     } else {
         data.resize(nelem); f.read((char*)data.data(),nelem*sizeof(float));
+    }
+
+    // Transpose from column-major to row-major if needed
+    if (fortran && shape.size() == 2) {
+        int64_t rows = shape[0], cols = shape[1];
+        std::vector<float> tmp(data.size());
+        for (int64_t c = 0; c < cols; c++)
+            for (int64_t r = 0; r < rows; r++)
+                tmp[r * cols + c] = data[c * rows + r];
+        data.swap(tmp);
     }
 
     if (shape.size()==1) { d0=(int)shape[0]; d1=1; }
@@ -153,6 +170,21 @@ static void read_npy_int32(const char* path, std::vector<int>& data, int& size) 
         }
     }
 
+    // Detect fortran_order (same logic as float32 reader)
+    bool fortran32 = false;
+    {
+        auto fk_fn = [&](const std::string& key) -> std::string {
+            size_t p = header.find("'"+key+"'"); if (p==std::string::npos) p=header.find("\""+key+"\"");
+            if (p==std::string::npos) return "";
+            size_t cl = header.find(':',p+key.size()+2); if (cl==std::string::npos) return "";
+            size_t st = header.find_first_not_of(" \"'",cl+1); if (st==std::string::npos) return "";
+            size_t en = header.find_first_of(",}\n",st);
+            return header.substr(st,en-st);
+        };
+        std::string fk = fk_fn("fortran_order");
+        if (fk == "True" || fk == "True," || fk == "1") fortran32 = true;
+    }
+
     bool is_int64 = (descr=="<i8"||descr=="|i8");
     if (is_int64) {
         std::vector<int64_t> tmp(nelem); f.read((char*)tmp.data(),nelem*sizeof(int64_t));
@@ -160,6 +192,17 @@ static void read_npy_int32(const char* path, std::vector<int>& data, int& size) 
     } else {
         data.resize(nelem); f.read((char*)data.data(),nelem*sizeof(int));
     }
+
+    // Transpose 2D int32 data if fortran_order
+    if (fortran32 && shape.size() == 2) {
+        int64_t rows = shape[0], cols = shape[1];
+        std::vector<int> tmp(data.size());
+        for (int64_t c = 0; c < cols; c++)
+            for (int64_t r = 0; r < rows; r++)
+                tmp[r * cols + c] = data[c * rows + r];
+        data.swap(tmp);
+    }
+
     size=(int)nelem;
 }
 
@@ -355,21 +398,320 @@ __global__ void reduce_best_kernel(
 }
 
 /* =================================================================== */
+/*  ANSI Logger (mismo estilo que python/logger.py)                    */
+/* =================================================================== */
+
+#define ANSI_BOLD    "\x1b[1m"
+#define ANSI_GREEN   "\x1b[32m"
+#define ANSI_YELLOW  "\x1b[33m"
+#define ANSI_CYAN    "\x1b[36m"
+#define ANSI_MAGENTA "\x1b[35m"
+#define ANSI_GOLD    "\x1b[1;33m"
+#define ANSI_RESET   "\x1b[0m"
+#define ANSI_DIM     "\x1b[2m"
+
+static int term_unicode(void) {
+#ifdef _WIN32
+    return 0;
+#else
+    return 1;
+#endif
+}
+
+static void log_header_cuda(const char *impl, int n_items, long k) {
+    int u = term_unicode();
+    const char *tl = u ? "\xe2\x95\xad" : "+"; // ╭
+    (void)u;
+    const char *tr = u ? "\xe2\x95\xae" : "+";
+    const char *bl = u ? "\xe2\x95\xb0" : "+";
+    const char *br = u ? "\xe2\x95\xaf" : "+";
+    const char *h  = u ? "\xe2\x95\x90" : "-";
+    const char *v  = u ? "\xe2\x95\x91" : "|";
+
+    int impl_len = (int)strlen(impl);
+    int pad = 48 - impl_len;
+    if (pad < 2) pad = 2;
+
+    fprintf(stderr, "\n");
+    fprintf(stderr, "%s%s%s %s ", ANSI_BOLD ANSI_CYAN, tl, h, impl);
+    for (int i = 0; i < pad; i++) fprintf(stderr, "%s", h);
+    fprintf(stderr, "%s%s\n", tr, ANSI_RESET);
+
+    fprintf(stderr, "%s%s%s  %s%s%s%s\n", ANSI_CYAN, v, ANSI_RESET,
+            ANSI_BOLD "BUSQUEDA DE PESOS OPTIMOS" ANSI_RESET, ANSI_CYAN, v, ANSI_RESET);
+    fprintf(stderr, "%s%s%s  items (N) ... %d%s%s\n", ANSI_CYAN, v, ANSI_RESET,
+            n_items, ANSI_CYAN, v, ANSI_RESET);
+    fprintf(stderr, "%s%s%s  candidatos   %ld%s%s\n", ANSI_CYAN, v, ANSI_RESET,
+            k, ANSI_CYAN, v, ANSI_RESET);
+    fprintf(stderr, "%s%s", ANSI_CYAN, bl);
+    for (int i = 0; i < 56; i++) fprintf(stderr, "%s", h);
+    fprintf(stderr, "%s%s\n\n", br, ANSI_RESET);
+}
+
+static void log_improvement_cuda(long iteration, long k,
+                                  double auc, double prev_auc,
+                                  double cons, double w1, double w2, double w3) {
+    const char *arrow = term_unicode() ? "\xe2\x9e\x9c" : "->";
+
+    if (prev_auc < 0) {
+        fprintf(stderr, "  %s%s%s  %sAUC %.6f%s  %s(initial)%s  iter %ld/%ld  consist=%.4f  w=[%.4f %.4f %.4f]\n",
+                ANSI_GOLD, arrow, ANSI_RESET,
+                ANSI_BOLD, auc, ANSI_RESET,
+                ANSI_GREEN, ANSI_RESET,
+                iteration, k, cons, w1, w2, w3);
+    } else {
+        double delta = auc - prev_auc;
+        fprintf(stderr, "  %s%s%s  %sAUC %.6f%s  %s(+%.6f)%s  iter %ld/%ld  consist=%.4f  w=[%.4f %.4f %.4f]\n",
+                ANSI_GOLD, arrow, ANSI_RESET,
+                ANSI_BOLD, auc, ANSI_RESET,
+                ANSI_GREEN, delta, ANSI_RESET,
+                iteration, k, cons, w1, w2, w3);
+    }
+}
+
+static void log_summary_cuda(const char *impl, double auc, double cons,
+                              double w1, double w2, double w3,
+                              double time_sec, int improvements) {
+    int u = term_unicode();
+    const char *tl = u ? "\xe2\x95\xad" : "+";
+    const char *tr = u ? "\xe2\x95\xae" : "+";
+    const char *bl = u ? "\xe2\x95\xb0" : "+";
+    const char *br = u ? "\xe2\x95\xaf" : "+";
+    const char *h  = u ? "\xe2\x95\x90" : "-";
+    const char *v  = u ? "\xe2\x95\x91" : "|";
+
+    char count_str[32];
+    snprintf(count_str, sizeof(count_str), "%d", improvements);
+    int count_len = (int)strlen(count_str);
+    int pad = 40 - count_len;
+    if (pad < 2) pad = 2;
+
+    fprintf(stderr, "\n");
+    fprintf(stderr, "%s%s%s MEJOR RESULTADO ", ANSI_BOLD ANSI_MAGENTA, tl, h);
+    for (int i = 0; i < pad; i++) fprintf(stderr, "%s", h);
+    fprintf(stderr, "%s%s\n", tr, ANSI_RESET);
+
+    fprintf(stderr, "%s%s%s  %simplementacion%s %s %s%s\n",
+            ANSI_BOLD ANSI_MAGENTA, v, ANSI_RESET,
+            ANSI_BOLD, ANSI_RESET, impl,
+            ANSI_BOLD ANSI_MAGENTA, v, ANSI_RESET);
+    fprintf(stderr, "%s%s%s  %smejoras%s        %s %s%s\n",
+            ANSI_BOLD ANSI_MAGENTA, v, ANSI_RESET,
+            ANSI_BOLD, ANSI_RESET, count_str,
+            ANSI_BOLD ANSI_MAGENTA, v, ANSI_RESET);
+    fprintf(stderr, "%s%s%s  %sAUC%s            %s %.9f%s%s\n",
+            ANSI_BOLD ANSI_MAGENTA, v, ANSI_RESET,
+            ANSI_BOLD, ANSI_RESET,
+            ANSI_GOLD, auc, ANSI_RESET,
+            ANSI_BOLD ANSI_MAGENTA, v, ANSI_RESET);
+    fprintf(stderr, "%s%s%s  %sconsistencia%s   %s %.4f%s%s\n",
+            ANSI_BOLD ANSI_MAGENTA, v, ANSI_RESET,
+            ANSI_BOLD, ANSI_RESET,
+            ANSI_BOLD ANSI_MAGENTA, cons,
+            v, ANSI_RESET);
+    fprintf(stderr, "%s%s%s  %spesos W%s        %s [%.9f, %.9f, %.9f]%s%s\n",
+            ANSI_BOLD ANSI_MAGENTA, v, ANSI_RESET,
+            ANSI_BOLD, ANSI_RESET,
+            ANSI_BOLD ANSI_MAGENTA, w1, w2, w3,
+            v, ANSI_RESET);
+    fprintf(stderr, "%s%s%s  %ssuma W%s         %s %.9f%s%s\n",
+            ANSI_BOLD ANSI_MAGENTA, v, ANSI_RESET,
+            ANSI_BOLD, ANSI_RESET,
+            ANSI_BOLD ANSI_MAGENTA, w1 + w2 + w3,
+            v, ANSI_RESET);
+    fprintf(stderr, "%s%s%s  %stiempo%s         %s %s%.6f s%s%s%s\n",
+            ANSI_BOLD ANSI_MAGENTA, v, ANSI_RESET,
+            ANSI_BOLD, ANSI_RESET,
+            ANSI_BOLD ANSI_MAGENTA,
+            ANSI_CYAN, time_sec, ANSI_RESET,
+            ANSI_BOLD ANSI_MAGENTA, v, ANSI_RESET);
+    fprintf(stderr, "%s%s", ANSI_BOLD ANSI_MAGENTA, bl);
+    for (int i = 0; i < 56; i++) fprintf(stderr, "%s", h);
+    fprintf(stderr, "%s%s\n\n", br, ANSI_RESET);
+}
+
+/* =================================================================== */
+/*  PCG64 portable (MSVC + GCC) — mismo RNG que OpenMP/MPI/Python      */
+/* =================================================================== */
+
+#ifdef _MSC_VER
+#include <intrin.h>
+static inline uint64_t mulh64(uint64_t a, uint64_t b, uint64_t *hi) {
+    return _umul128(a, b, hi);
+}
+#else
+static inline uint64_t mulh64(uint64_t a, uint64_t b, uint64_t *hi) {
+    __uint128_t r = (__uint128_t)a * b;
+    *hi = (uint64_t)(r >> 64);
+    return (uint64_t)r;
+}
+#endif
+
+static inline uint64_t rotr64(uint64_t x, unsigned r) {
+    return (x >> r) | (x << ((-r) & 63));
+}
+
+#define PCG_MULT_HI 2549297995355413924ULL
+#define PCG_MULT_LO 4865540595714422341ULL
+
+static void pcg64_seed(uint64_t *s, uint64_t seed) {
+    // SeedSequence simplificado (equivalente a numpy)
+    uint32_t pool[4];
+    uint32_t hc = 0x43b0d7e5U;
+    uint32_t ent[2] = { (uint32_t)(seed & 0xFFFFFFFFULL), (uint32_t)(seed >> 32) };
+    int nent = (seed <= 0xFFFFFFFFULL) ? 1 : 2;
+    for (int i = 0; i < 4; i++) pool[i] = 0;
+    for (int i = 0; i < 4; i++) {
+        uint32_t v = (i < nent) ? ent[i] : 0;
+        v ^= hc; hc = (hc * 0x931e8875U) & 0xFFFFFFFFU;
+        v = (v * hc) & 0xFFFFFFFFU; v ^= (v >> 16);
+        pool[i] = v;
+    }
+    for (int src = 0; src < 4; src++)
+        for (int dst = 0; dst < 4; dst++)
+            if (src != dst) {
+                uint32_t x = pool[dst], y = pool[src];
+                uint32_t mix = (0xca01f9ddU * x - 0x4973f715U * y) & 0xFFFFFFFFU;
+                mix ^= (mix >> 16);
+                uint32_t hv = y ^ hc; hc = (hc * 0x58f38dedU) & 0xFFFFFFFFU;
+                hv = (hv * hc) & 0xFFFFFFFFU; hv ^= (hv >> 16);
+                pool[dst] = mix ^ hv;
+            }
+
+    uint64_t ss[4];
+    uint32_t hc2 = 0x8b51f9ddU;
+    for (int i = 0; i < 4; i++) {
+        uint32_t lo, hi;
+        uint32_t dv = pool[i % 4] ^ hc2;
+        hc2 = (hc2 * 0x58f38dedU) & 0xFFFFFFFFU;
+        dv = (dv * hc2) & 0xFFFFFFFFU; dv ^= (dv >> 16);
+        lo = dv;
+        i++;
+        dv = pool[i % 4] ^ hc2;
+        hc2 = (hc2 * 0x58f38dedU) & 0xFFFFFFFFU;
+        dv = (dv * hc2) & 0xFFFFFFFFU; dv ^= (dv >> 16);
+        hi = dv;
+        ss[i/2] = (uint64_t)lo | ((uint64_t)hi << 32);
+    }
+
+    uint64_t initstate_hi = ss[0], initstate_lo = ss[1];
+    uint64_t initseq_hi   = ss[2], initseq_lo   = ss[3];
+
+    // inc = (initseq << 1) | 1  (128-bit shift)
+    uint64_t inc_hi = (initseq_hi << 1) | (initseq_lo >> 63);
+    uint64_t inc_lo = (initseq_lo << 1) | 1;
+
+    // state = 0, then state = state * mult + inc twice
+    uint64_t st_hi = 0, st_lo = 0;
+    for (int r = 0; r < 2; r++) {
+        // mul128(st, PCG_MULT)
+        uint64_t lo, hi1, lo2, hi2, lo3, hi3;
+        lo  = mulh64(st_lo, PCG_MULT_LO, &hi1);
+        lo2 = mulh64(st_hi, PCG_MULT_LO, &hi2);
+        lo3 = mulh64(st_lo, PCG_MULT_HI, &hi3);
+        uint64_t m_lo = lo;
+        uint64_t m_hi = hi1 + lo2 + lo3 + st_hi * PCG_MULT_HI;
+
+        // m += inc
+        uint64_t sum_lo = m_lo + inc_lo;
+        uint64_t sum_hi = m_hi + inc_hi + (sum_lo < m_lo ? 1 : 0);
+        st_hi = sum_hi; st_lo = sum_lo;
+
+        if (r == 0) {
+            // state += initstate
+            uint64_t a_lo = st_lo + initstate_lo;
+            uint64_t a_hi = st_hi + initstate_hi + (a_lo < st_lo ? 1 : 0);
+            st_hi = a_hi; st_lo = a_lo;
+        }
+    }
+    s[0] = st_hi; s[1] = st_lo; s[2] = inc_hi; s[3] = inc_lo;
+}
+
+static uint64_t pcg64_xs(uint64_t *s) {
+    uint64_t hi = s[0], st_lo = s[1];
+    uint64_t lo, hi1, lo2, hi2, lo3, hi3;
+    lo  = mulh64(st_lo, PCG_MULT_LO, &hi1);
+    lo2 = mulh64(hi,  PCG_MULT_LO, &hi2);
+    lo3 = mulh64(st_lo, PCG_MULT_HI, &hi3);
+    uint64_t m_lo = lo;
+    uint64_t m_hi = hi1 + lo2 + lo3 + hi * PCG_MULT_HI;
+    uint64_t sum_lo = m_lo + s[3];
+    uint64_t sum_hi = m_hi + s[2] + (sum_lo < m_lo ? 1 : 0);
+    s[0] = sum_hi; s[1] = sum_lo;
+
+    unsigned rot = (unsigned)(hi >> 58);
+    return rotr64(hi ^ st_lo, rot);
+}
+
+static double pcg64_u01(uint64_t *s) {
+    return (pcg64_xs(s) >> 11) * (1.0 / 9007199254740992.0);
+}
+
+static void pcg64_simplex(uint64_t *s, double w[3]) {
+    double a = -log(pcg64_u01(s));
+    double b = -log(pcg64_u01(s));
+    double c = -log(pcg64_u01(s));
+    double sum = a + b + c;
+    w[0] = a / sum; w[1] = b / sum; w[2] = c / sum;
+}
+
+static void pcg64_dirichlet(const double alpha[3], uint64_t *s, double w[3]) {
+    // Gamma(alpha, 1) via Marsaglia-Tsang for alpha >= 1, Best for alpha < 1
+    auto gamma_sample = [&](double a) -> double {
+        if (a <= 0.0) return 0.0;
+        if (a == 1.0) return -log(pcg64_u01(s));
+        if (a < 1.0) {
+            double e = 2.71828182845904523536;
+            double thr = e / (e + a);
+            for (;;) {
+                double u = pcg64_u01(s), v = pcg64_u01(s);
+                if (u <= thr) {
+                    double z = pow(v * a, 1.0 / a);
+                    if (z <= 1.0) return z;
+                } else {
+                    double z = 1.0 - log(v);
+                    if (u <= pow(z, a - 1.0)) return z;
+                }
+            }
+        } else {
+            double d = a - 1.0 / 3.0;
+            double c = 1.0 / sqrt(9.0 * d);
+            for (;;) {
+                double u1, u2;
+                double x, v, v3;
+                do {
+                    u1 = pcg64_u01(s);
+                    while (u1 == 0.0) u1 = pcg64_u01(s);
+                    u2 = pcg64_u01(s);
+                    x = sqrt(-2.0 * log(u1)) * cos(2.0 * 3.14159265358979323846 * u2);
+                    v = 1.0 + c * x;
+                } while (v <= 0.0);
+                v3 = v * v * v;
+                double u = pcg64_u01(s);
+                if (u < 1.0 - 0.0331 * (x * x) * (x * x)) return d * v3;
+                if (log(u) < 0.5 * x * x + d * (1.0 - v3 + log(v3))) return d * v3;
+            }
+        }
+    };
+    double g[3], sum = 0.0;
+    for (int i = 0; i < 3; i++) { g[i] = gamma_sample(alpha[i]); sum += g[i]; }
+    for (int i = 0; i < 3; i++) w[i] = g[i] / sum;
+}
+
+/* =================================================================== */
 /*  Host weight generation                                              */
 /* =================================================================== */
 
 static void generate_random_weights(std::vector<float>& weights, int K, unsigned int seed) {
     weights.resize(K * 3);
-    std::mt19937 rng(seed);
-    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+    uint64_t pcg[4];
+    pcg64_seed(pcg, (uint64_t)seed);
     for (int i = 0; i < K; i++) {
-        float x1 = -std::log(1.0f - dist(rng) + 1e-37f);
-        float x2 = -std::log(1.0f - dist(rng) + 1e-37f);
-        float x3 = -std::log(1.0f - dist(rng) + 1e-37f);
-        float sum = x1 + x2 + x3;
-        weights[i * 3 + 0] = x1 / sum;
-        weights[i * 3 + 1] = x2 / sum;
-        weights[i * 3 + 2] = x3 / sum;
+        double w[3];
+        pcg64_simplex(pcg, w);
+        weights[i * 3 + 0] = (float)w[0];
+        weights[i * 3 + 1] = (float)w[1];
+        weights[i * 3 + 2] = (float)w[2];
     }
 }
 
@@ -393,19 +735,15 @@ static int resolution_for_K(int K) {
 
 static void generate_dirichlet_weights(std::vector<float>& weights,
                                         const float* alpha, int n,
-                                        std::mt19937& rng) {
+                                        uint64_t* pcg) {
     weights.resize(n * 3);
-    std::gamma_distribution<float> gamma1(alpha[0], 1.0f);
-    std::gamma_distribution<float> gamma2(alpha[1], 1.0f);
-    std::gamma_distribution<float> gamma3(alpha[2], 1.0f);
+    double alphad[3] = { (double)alpha[0], (double)alpha[1], (double)alpha[2] };
     for (int i = 0; i < n; i++) {
-        float x1 = gamma1(rng);
-        float x2 = gamma2(rng);
-        float x3 = gamma3(rng);
-        float sum = x1 + x2 + x3;
-        weights[i * 3 + 0] = x1 / sum;
-        weights[i * 3 + 1] = x2 / sum;
-        weights[i * 3 + 2] = x3 / sum;
+        double w[3];
+        pcg64_dirichlet(alphad, pcg, w);
+        weights[i * 3 + 0] = (float)w[0];
+        weights[i * 3 + 1] = (float)w[1];
+        weights[i * 3 + 2] = (float)w[2];
     }
 }
 
@@ -470,14 +808,17 @@ struct SearchOutput {
 
 static SearchOutput run_random_search(
     const GPUData& gpu, int K, unsigned int seed,
-    int block_size, int batch_size)
+    int block_size, int batch_size, int verbose)
 {
+    if (verbose) log_header_cuda("cuda_c (random)", gpu.n_items, K);
+
     auto t0 = std::chrono::high_resolution_clock::now();
     std::vector<float> all_w;
     generate_random_weights(all_w, K, seed);
 
-    float best_auc = -1.0f, best_cons = -1.0f;
+    float best_auc = -1.0f, best_cons = -1.0f, prev_auc = -1.0f;
     int best_idx = -1;
+    int improvements = 0;
     std::vector<float> ba(batch_size), bc(batch_size);
 
     for (int off = 0; off < K; off += batch_size) {
@@ -489,7 +830,16 @@ static SearchOutput run_random_search(
             if (ba[i] > best_auc) better = true;
             else if (ba[i] == best_auc && bc[i] > best_cons) better = true;
             else if (ba[i] == best_auc && bc[i] == best_cons && gi < best_idx) better = true;
-            if (better) { best_auc = ba[i]; best_cons = bc[i]; best_idx = gi; }
+            if (better) {
+                prev_auc = best_auc;
+                best_auc = ba[i]; best_cons = bc[i]; best_idx = gi;
+                improvements++;
+                if (verbose) {
+                    float *w = &all_w[gi * 3];
+                    log_improvement_cuda(gi, K, best_auc, prev_auc, best_cons,
+                                         w[0], w[1], w[2]);
+                }
+            }
         }
     }
 
@@ -502,21 +852,30 @@ static SearchOutput run_random_search(
     out.best_w2 = all_w[best_idx * 3 + 2];
     out.K_actual = K;
     out.time_sec = std::chrono::duration<double>(t1 - t0).count();
+
+    if (verbose) {
+        log_summary_cuda("cuda_c (random)", best_auc, best_cons,
+                         out.best_w0, out.best_w1, out.best_w2,
+                         out.time_sec, improvements);
+    }
     return out;
 }
 
 static SearchOutput run_grid_search(
     const GPUData& gpu, int K_hint,
     int block_size, int batch_size,
-    int grid_resolution)
+    int grid_resolution, int verbose)
 {
     int resolution = (grid_resolution > 0) ? grid_resolution : resolution_for_K(K_hint);
     std::vector<float> all_w;
     int actual_K = generate_grid_weights(all_w, resolution);
 
+    if (verbose) log_header_cuda("cuda_c (grid)", gpu.n_items, actual_K);
+
     auto t0 = std::chrono::high_resolution_clock::now();
-    float best_auc = -1.0f, best_cons = -1.0f;
+    float best_auc = -1.0f, best_cons = -1.0f, prev_auc = -1.0f;
     int best_idx = -1;
+    int improvements = 0;
     std::vector<float> ba(batch_size), bc(batch_size);
 
     for (int off = 0; off < actual_K; off += batch_size) {
@@ -528,7 +887,16 @@ static SearchOutput run_grid_search(
             if (ba[i] > best_auc) better = true;
             else if (ba[i] == best_auc && bc[i] > best_cons) better = true;
             else if (ba[i] == best_auc && bc[i] == best_cons && gi < best_idx) better = true;
-            if (better) { best_auc = ba[i]; best_cons = bc[i]; best_idx = gi; }
+            if (better) {
+                prev_auc = best_auc;
+                best_auc = ba[i]; best_cons = bc[i]; best_idx = gi;
+                improvements++;
+                if (verbose) {
+                    float *w = &all_w[gi * 3];
+                    log_improvement_cuda(gi, actual_K, best_auc, prev_auc, best_cons,
+                                         w[0], w[1], w[2]);
+                }
+            }
         }
     }
 
@@ -541,12 +909,18 @@ static SearchOutput run_grid_search(
     out.best_w2 = all_w[best_idx * 3 + 2];
     out.K_actual = actual_K;
     out.time_sec = std::chrono::duration<double>(t1 - t0).count();
+
+    if (verbose) {
+        log_summary_cuda("cuda_c (grid)", best_auc, best_cons,
+                         out.best_w0, out.best_w1, out.best_w2,
+                         out.time_sec, improvements);
+    }
     return out;
 }
 
 static SearchOutput run_hybrid_search(
     const GPUData& gpu, int K, unsigned int seed,
-    int block_size, int batch_size)
+    int block_size, int batch_size, int verbose)
 {
     auto t0 = std::chrono::high_resolution_clock::now();
 
@@ -588,7 +962,16 @@ static SearchOutput run_hybrid_search(
             if (ba[i] > best_auc) better = true;
             else if (ba[i] == best_auc && bc[i] > best_cons) better = true;
             else if (ba[i] == best_auc && bc[i] == best_cons && gi < best_idx) better = true;
-            if (better) { best_auc = ba[i]; best_cons = bc[i]; best_idx = gi; }
+            if (better) {
+                best_auc = ba[i]; best_cons = bc[i]; best_idx = gi;
+                if (verbose) {
+                    float *w = &all_w[gi * 3];
+                    fprintf(stderr, "  \x1b[1;33m->\x1b[0m  "
+                            "\x1b[1mAUC %.6f\x1b[0m  "
+                            "iter %d/%d  consist=%.4f  w=[%.4f %.4f %.4f]\n",
+                            best_auc, gi, total_K, best_cons, w[0], w[1], w[2]);
+                }
+            }
         }
     }
 
@@ -602,9 +985,10 @@ static SearchOutput run_hybrid_search(
             std::max(bw1 * 100.0f, 1e-3f),
             std::max(bw2 * 100.0f, 1e-3f)
         };
-        std::mt19937 rng(seed + 2);
+        uint64_t pcg_local[4];
+        pcg64_seed(pcg_local, (uint64_t)(seed + 2));
         std::vector<float> local_w;
-        generate_dirichlet_weights(local_w, alpha, K_local, rng);
+        generate_dirichlet_weights(local_w, alpha, K_local, pcg_local);
         int local_offset = (int)(all_w.size() / 3);
         all_w.insert(all_w.end(), local_w.begin(), local_w.end());
 
@@ -617,7 +1001,16 @@ static SearchOutput run_hybrid_search(
                 if (ba[i] > best_auc) better = true;
                 else if (ba[i] == best_auc && bc[i] > best_cons) better = true;
                 else if (ba[i] == best_auc && bc[i] == best_cons && gi < best_idx) better = true;
-                if (better) { best_auc = ba[i]; best_cons = bc[i]; best_idx = gi; }
+                if (better) {
+                    best_auc = ba[i]; best_cons = bc[i]; best_idx = gi;
+                    if (verbose) {
+                        float *w = &all_w[gi * 3];
+                        fprintf(stderr, "  \x1b[1;33m->\x1b[0m  "
+                                "\x1b[1mAUC %.6f\x1b[0m  "
+                                "iter %d/%d  consist=%.4f  w=[%.4f %.4f %.4f]\n",
+                                best_auc, gi, K, best_cons, w[0], w[1], w[2]);
+                    }
+                }
             }
         }
     }
@@ -676,6 +1069,7 @@ int main(int argc, char** argv) {
     std::string mode = "full";
     int grid_resolution = 0;
     bool verbose = false;
+    std::string weights_file = "";
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--k") == 0 && i + 1 < argc) K = atoi(argv[++i]);
@@ -686,6 +1080,7 @@ int main(int argc, char** argv) {
         else if (strcmp(argv[i], "--batch-size") == 0 && i + 1 < argc) batch_size = atoi(argv[++i]);
         else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) mode = argv[++i];
         else if (strcmp(argv[i], "--grid-resolution") == 0 && i + 1 < argc) grid_resolution = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--weights-file") == 0 && i + 1 < argc) weights_file = argv[++i];
         else if (strcmp(argv[i], "--verbose") == 0) verbose = true;
     }
 
@@ -746,12 +1141,71 @@ int main(int argc, char** argv) {
 
     // ── Run search ──
     SearchOutput result;
-    if (search_mode == "grid") {
-        result = run_grid_search(gpu, K, block_size, batch_size, grid_resolution);
+
+    if (!weights_file.empty()) {
+        // Load pre-generated weights from file (same RNG as Python)
+        std::vector<float> ext_weights;
+        FILE *fw = fopen(weights_file.c_str(), "rb");
+        if (!fw) { fprintf(stderr, "Error: cannot open %s\n", weights_file.c_str()); return 1; }
+        fseek(fw, 0, SEEK_END); long fsize = ftell(fw); rewind(fw);
+        int n_floats = (int)(fsize / sizeof(float));
+        if (n_floats % 3 != 0) { fprintf(stderr, "Error: weights file size not multiple of 3\n"); return 1; }
+        int ext_K = n_floats / 3;
+        ext_weights.resize(n_floats);
+        fread(ext_weights.data(), sizeof(float), n_floats, fw);
+        fclose(fw);
+
+        if (verbose) {
+            log_header_cuda("cuda_c (weights-file)", gpu.n_items, ext_K);
+        }
+
+        // Evaluate all weights in batches
+        float best_auc = -1.0f, best_cons = -1.0f, prev_auc = -1.0f;
+        int best_idx = -1;
+        int improvements = 0;
+        std::vector<float> ba(batch_size), bc(batch_size);
+        for (int off = 0; off < ext_K; off += batch_size) {
+            int bk = std::min(batch_size, ext_K - off);
+            evaluate_batch(gpu, &ext_weights[off * 3], bk, ba.data(), bc.data(), block_size);
+            for (int i = 0; i < bk; i++) {
+                int gi = off + i;
+                bool better = false;
+                if (ba[i] > best_auc) better = true;
+                else if (ba[i] == best_auc && bc[i] > best_cons) better = true;
+                else if (ba[i] == best_auc && bc[i] == best_cons && gi < best_idx) better = true;
+                if (better) {
+                    prev_auc = best_auc;
+                    best_auc = ba[i]; best_cons = bc[i]; best_idx = gi;
+                    improvements++;
+                    if (verbose) {
+                        float *w = &ext_weights[gi * 3];
+                        log_improvement_cuda(gi, ext_K, best_auc, prev_auc, best_cons,
+                                             w[0], w[1], w[2]);
+                    }
+                }
+            }
+        }
+
+        if (verbose) {
+            log_summary_cuda("cuda_c (weights-file)", best_auc, best_cons,
+                             ext_weights[best_idx*3+0], ext_weights[best_idx*3+1],
+                             ext_weights[best_idx*3+2], 0.0, improvements);
+        }
+        result.best_auc = best_auc;
+        result.best_consistency = best_cons;
+        result.best_w0 = ext_weights[best_idx * 3 + 0];
+        result.best_w1 = ext_weights[best_idx * 3 + 1];
+        result.best_w2 = ext_weights[best_idx * 3 + 2];
+        result.K_actual = ext_K;
+        result.time_sec = 0.0;
+        auto t0e = std::chrono::high_resolution_clock::now();
+        result.time_sec = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - t0e).count();
+    } else if (search_mode == "grid") {
+        result = run_grid_search(gpu, K, block_size, batch_size, grid_resolution, verbose);
     } else if (search_mode == "hybrid") {
-        result = run_hybrid_search(gpu, K, seed, block_size, batch_size);
+        result = run_hybrid_search(gpu, K, seed, block_size, batch_size, verbose);
     } else {
-        result = run_random_search(gpu, K, seed, block_size, batch_size);
+        result = run_random_search(gpu, K, seed, block_size, batch_size, verbose);
     }
 
     // ── Output CSV ──
@@ -760,11 +1214,6 @@ int main(int argc, char** argv) {
            result.best_auc, result.best_consistency,
            result.best_w0, result.best_w1, result.best_w2,
            result.time_sec, seed, block_size);
-
-    if (verbose) {
-        float wsum = result.best_w0 + result.best_w1 + result.best_w2;
-        fprintf(stderr, "W sum = %.9f (should be ~1)\n", wsum);
-    }
 
     // ── Cleanup ──
     CUDA_CHECK(cudaFree(gpu.d_A));
