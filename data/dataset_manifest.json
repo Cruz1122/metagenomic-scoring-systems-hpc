@@ -46,7 +46,7 @@
     ],
     "n_healthy": 1000,
     "n_crc": 1000,
-    "row_sum_min": 0.9999998807907104,
+    "row_sum_min": 0.9999999403953552,
     "row_sum_max": 1.0000001192092896,
     "profiles_min": 0.10158631205558777,
     "profiles_max": 0.8730771541595459,
@@ -58,11 +58,11 @@
     "n_items_ok": true
   },
   "quick_eval": {
-    "T_only_auc": 0.7312345,
-    "S_only_auc": 0.6933645,
-    "F_only_auc": 0.7224605,
-    "equal_auc": 0.7710555,
-    "best_auc": 0.792748,
+    "T_only_auc": 0.731212,
+    "S_only_auc": 0.6933695,
+    "F_only_auc": 0.722481,
+    "equal_auc": 0.7710365,
+    "best_auc": 0.792752,
     "best_w": [
       0.4614786207675934,
       0.40406572818756104,

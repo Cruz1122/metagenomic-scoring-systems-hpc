@@ -26,7 +26,7 @@ evaluate_precompute = None
 
 # ── CUDA kernel source ────────────────────────────────────────────────
 KERNEL_CODE = """
-#define MAX_SAMPLES 1024
+#define MAX_SAMPLES 4096
 
 // ── AUC por conteo de pares positivo-negativo ──
 __device__ float auc_device(const float* scores, const int* labels, int n) {
