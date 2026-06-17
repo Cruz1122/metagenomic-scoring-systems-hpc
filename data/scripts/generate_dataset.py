@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-generate_dataset.py — synthetic-compatible metagenomic scoring dataset.
+generate_dataset.py — synthetic-compatible metagenomic scoring dataset for HPC benchmarking.
 
 Default dataset:
   EVAL: 2000 samples = 1000 healthy + 1000 CRC
   REF:  1000 samples = 500 healthy + 500 CRC
-  Items: 500
+  Items: 10000
   Seed: 42
 
 Contract:
@@ -33,19 +33,19 @@ import pandas as pd
 
 DEFAULT_N_EVAL = 2000
 DEFAULT_N_REF = 1000
-DEFAULT_N_ITEMS = 500
+DEFAULT_N_ITEMS = 10000
 DEFAULT_SEED = 42
 
-DEFAULT_SIGNAL = 0.45
-DEFAULT_T_STRENGTH = 0.85
-DEFAULT_METADATA_STRENGTH = 0.08
-DEFAULT_FUNCTIONAL_OVERLAP = 0.30
-DEFAULT_METADATA_FRACTION = 0.22
-DEFAULT_ZERO_INFLATION = 0.08
-DEFAULT_NOISE_SIGMA = 0.35
+DEFAULT_SIGNAL = 0.35
+DEFAULT_T_STRENGTH = 0.80
+DEFAULT_METADATA_STRENGTH = 0.07
+DEFAULT_FUNCTIONAL_OVERLAP = 0.22
+DEFAULT_METADATA_FRACTION = 0.16
+DEFAULT_ZERO_INFLATION = 0.12
+DEFAULT_NOISE_SIGMA = 0.50
 
-CRC_ENRICHED_FRACTION = 0.08
-HEALTHY_ENRICHED_FRACTION = 0.08
+CRC_ENRICHED_FRACTION = 0.030
+HEALTHY_ENRICHED_FRACTION = 0.030
 
 STUDY_NAME = "synthetic_CRC_study_scaled"
 
@@ -464,6 +464,7 @@ def write_dataset(
     item_mapping: pd.DataFrame,
     functional_matrix: pd.DataFrame,
     manifest: dict[str, Any],
+    write_matrix_csv: bool = True,
 ) -> None:
     csv_dir = output_dir / "csv"
     npy_dir = output_dir / "npy"
@@ -474,9 +475,17 @@ def write_dataset(
 
     samples_eval.to_csv(csv_dir / "samples.csv", index=False)
 
-    matrix_df = pd.DataFrame(A_eval, columns=item_ids)
-    matrix_df.insert(0, "sample_id", samples_eval["sample_id"].to_numpy())
-    matrix_df.to_csv(csv_dir / "matrix_A.csv", index=False, float_format="%.9g")
+    if write_matrix_csv:
+        matrix_df = pd.DataFrame(A_eval, columns=item_ids)
+        matrix_df.insert(0, "sample_id", samples_eval["sample_id"].to_numpy())
+        matrix_df.to_csv(csv_dir / "matrix_A.csv", index=False, float_format="%.9g")
+    else:
+        # Para datasets muy grandes, matrix_A.npy es la fuente eficiente.
+        # Se deja un README explícito en lugar de crear un CSV de cientos de MB.
+        (csv_dir / "matrix_A.README.txt").write_text(
+            "matrix_A.csv omitido por --no-matrix-csv. Usa npy/matrix_A.npy como matriz principal.\n",
+            encoding="utf-8",
+        )
 
     metadata_eval.to_csv(csv_dir / "metadata.csv", index=False)
     functional_matrix.to_csv(csv_dir / "functional_matrix.csv", index=False)
@@ -536,9 +545,19 @@ def validate_dataset(A: np.ndarray, y: np.ndarray, profiles: np.ndarray, min_eva
 
 
 def quick_eval(A: np.ndarray, y: np.ndarray, profiles: np.ndarray, rng: np.random.Generator, k: int) -> dict[str, Any]:
+    """
+    Sanity check rápido para datasets grandes.
+
+    Evita recalcular A @ (profiles @ W) para cada W. Por asociatividad:
+        A @ (profiles @ W) == (A @ profiles) @ W
+    Primero calcula Z = A @ profiles, de tamaño n_samples x 3. Luego cada
+    evaluación de W cuesta O(n_samples * 3), no O(n_samples * n_items).
+    Esto es clave para n_items=10000.
+    """
+    Z = (A.astype(np.float32, copy=False) @ profiles.astype(np.float32, copy=False)).astype(np.float32)
+
     def eval_w(w: np.ndarray) -> float:
-        P = profiles @ w
-        scores = A @ P
+        scores = Z @ w.astype(np.float32, copy=False)
         return auc_rank(y, scores)
 
     result: dict[str, Any] = {
@@ -661,7 +680,7 @@ def build_dataset(args: argparse.Namespace) -> Path:
         }
     )
 
-    validation = validate_dataset(A_eval, y_eval, profiles_TSF, min_eval=args.n_eval, n_items=args.n_items)
+    validation = validate_dataset(A_eval, y_eval, profiles_TSF, min_eval=2000, n_items=args.n_items)
     qe = quick_eval(A_eval, y_eval, profiles_TSF, rng, args.quick_k)
 
     dataset_name = args.name
@@ -703,6 +722,7 @@ def build_dataset(args: argparse.Namespace) -> Path:
         "F_formula": "controlled functional proxy from item group with functional_overlap",
         "F_source": "synthetic functional markers with controlled overlap",
         "reference_split_note": "T and S are computed from REF. EVAL is exported for benchmark to avoid label leakage.",
+        "matrix_A_csv_written": bool(not args.no_matrix_csv),
         "validation": validation,
         "quick_eval": qe,
     }
@@ -717,6 +737,7 @@ def build_dataset(args: argparse.Namespace) -> Path:
         item_mapping=item_mapping,
         functional_matrix=functional_matrix,
         manifest=manifest,
+        write_matrix_csv=not args.no_matrix_csv,
     )
 
     if args.write_root_copy:
@@ -767,6 +788,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--quick-k", type=int, default=500, help="K de random search para sanity check; 0 lo desactiva.")
     parser.add_argument("--allow-small", action="store_true", help="Permite n-eval < 2000 solo para pruebas.")
     parser.add_argument("--write-root-copy", action="store_true", help="Copia también a data/csv, data/npy y data/dataset_manifest.json.")
+    parser.add_argument("--no-matrix-csv", action="store_true", help="Omite csv/matrix_A.csv; conserva npy/matrix_A.npy. Recomendado para 2000x10000 si el repo no debe inflarse.")
     return parser.parse_args()
 
 

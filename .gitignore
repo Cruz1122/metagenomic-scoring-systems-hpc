@@ -20,6 +20,7 @@ compile_commands.json
 compile_flags.txt
 
 # Generated dataset (regenerate with: python data/scripts/generate_data.py)
+data/processed/
 data/npy/*
 data/csv/*
 !data/csv/.gitkeep
