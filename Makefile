@@ -7,6 +7,9 @@ THETA ?=
 THREADS ?= 4
 MPI_RANKS ?= 4
 DATA_DIR ?= data
+MPICC ?= cl
+MPICFLAGS ?= /O2 /std:c11 /I"C:/Program Files (x86)/Microsoft SDKs/MPI/Include"
+MPILDFLAGS ?= "C:/Program Files (x86)/Microsoft SDKs/MPI/Lib/x64/msmpi.lib" /link
 
 .PHONY: help data python-seq python-mp python-mp-grid python-mp-hybrid c openmp-run mpi-run cuda cuda-run pycuda-run benchmark plots clean
 
@@ -73,3 +76,4 @@ clean:
 	$(MAKE) -C CUDA clean || true
 	rm -f results/benchmark.csv results/benchmark_raw.csv results/plots/*.png
 	rm -rf data/npy/ data/csv/ data/dataset_manifest.json
+

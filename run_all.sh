@@ -56,7 +56,12 @@ fi
 # 6. C MPI
 if command -v mpicc >/dev/null 2>&1 && command -v mpirun >/dev/null 2>&1 && make -C C_OpenMP_MPI scoring_mpi >/dev/null 2>&1; then
   for R in $MPI_RANKS_LIST; do
-    mpirun --allow-run-as-root -np "$R" ./C_OpenMP_MPI/scoring_mpi --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" >> "$RAW" || true
+    # random
+    mpirun --allow-run-as-root -np "$R" ./C_OpenMP_MPI/scoring_mpi --strategy random --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" >> "$RAW" || true
+    # grid
+    mpirun --allow-run-as-root -np "$R" ./C_OpenMP_MPI/scoring_mpi --strategy grid --grid-steps 141 --data-dir "$DATA_DIR" >> "$RAW" || true
+    # hybrid
+    mpirun --allow-run-as-root -np "$R" ./C_OpenMP_MPI/scoring_mpi --strategy hybrid --k "$K" --seed "$SEED" --refine-steps 2000 --data-dir "$DATA_DIR" >> "$RAW" || true
   done
 else
   echo "[WARN] MPI no disponible; omitido." >&2
