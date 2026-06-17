@@ -60,14 +60,15 @@ help:
 	@echo ""
 	@echo "  make data | make test-args | make benchmark | make plots | make clean"
 
-data-100:
-	$(PYTHON) data/scripts/generate_dataset.py --name synthetic_CRC100x500_balanced \
-		--n-eval 100 --n-ref 200 --seed $(SEED) --allow-small
-
-data-2000: data
-
 data:
-	$(PYTHON) data/scripts/generate_dataset.py --seed $(SEED)
+	$(PYTHON) data/scripts/generate_dataset.py \
+	  --name synthetic_CRC2000x10000_balanced \
+	  --n-eval 2000 \
+	  --n-ref 1000 \
+	  --n-items 10000 \
+	  --seed $(SEED) \
+	  --quick-k 500 \
+	  --write-root-copy
 
 # ── Python ──────────────────────────────────────────────────────────
 
