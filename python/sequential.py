@@ -108,6 +108,7 @@ def _sample_local_dirichlet(best_w, n: int, rng,
 
 
 def hybrid_search(A, y, profiles, k: int, seed: int,
+                  step: float = 0.02,
                   log: Log | None = None):
     """Búsqueda híbrida en tres fases: grid + random + local — secuencial.
 
@@ -131,7 +132,7 @@ def hybrid_search(A, y, profiles, k: int, seed: int,
 
     # ── Fase 1: Grid grueso ────────────────────────────────────────────
     best_auc, best_consistency, best_w, best_iter, iteration = grid_search(
-        A, y, profiles, log=log
+        A, y, profiles, step=step, log=log
     )
 
     remaining = k - iteration
@@ -177,7 +178,8 @@ def hybrid_search(A, y, profiles, k: int, seed: int,
 
 def timed_search(name: str, p: int, A, y, profiles, k: int, seed: int,
                  log: Log | None = None,
-                 search_mode: str = 'random') -> SearchResult:
+                 search_mode: str = 'random',
+                 step: float = 0.02) -> SearchResult:
     """Ejecuta búsqueda de pesos con medición de tiempo — secuencial.
 
     El cronómetro cubre solo la búsqueda (no la carga de datos).
@@ -199,11 +201,11 @@ def timed_search(name: str, p: int, A, y, profiles, k: int, seed: int,
 
     if search_mode == 'grid':
         best_auc, best_consistency, best_weights, best_iter, actual_k = \
-            grid_search(A, y, profiles, log=log)
+            grid_search(A, y, profiles, step=step, log=log)
         k = actual_k
     elif search_mode == 'hybrid':
         best_auc, best_consistency, best_weights, best_iter = \
-            hybrid_search(A, y, profiles, k, seed, log=log)
+            hybrid_search(A, y, profiles, k, seed, step=step, log=log)
     else:  # 'random'
         best_auc, best_consistency, best_weights, best_iter = \
             random_search(A, y, profiles, k, seed, log=log)
@@ -237,6 +239,8 @@ def main():
     ap.add_argument('--seed', type=int, default=42, help='Semilla RNG')
     ap.add_argument('--search', choices=['random', 'grid', 'hybrid'],
                     default='random', help='Estrategia de búsqueda')
+    ap.add_argument('--step', type=float, default=0.02,
+                    help='Paso del grid (default 0.02)')
     ap.add_argument('--data-dir', type=Path, default=Path('data'), help='Directorio de datos')
     ap.add_argument('--csv', action='store_true', help='Salida en CSV (formato benchmark)')
     args = ap.parse_args()
@@ -249,7 +253,7 @@ def main():
 
     # Búsqueda con tiempo
     result = timed_search('python_sequential', 1, A, y, profiles, args.k, args.seed,
-                          log=log, search_mode=args.search)
+                          log=log, search_mode=args.search, step=args.step)
 
     # --- Salida ---
     if args.csv:

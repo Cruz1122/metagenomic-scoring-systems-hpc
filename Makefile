@@ -5,9 +5,10 @@ K            ?= 10000
 SEED         ?= 42
 SEARCH       ?= random
 STEP         ?= 0.02
-THREADS      ?= 4
-MPI_RANKS    ?= 4
 WORKERS      ?= 4
+THREADS      ?= 4
+MPI_RANKS    ?= $(WORKERS)
+PYTHON       ?= .venv/bin/python
 DATA_DIR     ?=
 DATASET_SIZE ?= 2000
 WORKERS_LIST ?= 2 4
@@ -37,7 +38,7 @@ export OPENMPFLAGS ?= -fopenmp
 .PHONY: help data data-100 data-2000 \
         python-sequential python-multicore python-pycuda \
         c-sequential c-openmp c-mpi c-cuda \
-        c cuda benchmark plots clean
+        c cuda benchmark plots test-args clean
 
 help:
 	@echo "Build:"
@@ -55,31 +56,32 @@ help:
 	@echo ""
 	@echo "Vars: K, SEED, SEARCH, STEP, DATA_DIR, THREADS, MPI_RANKS, WORKERS"
 	@echo "  make c-openmp K=500 THREADS=2 SEARCH=random"
+	@echo "  make c-mpi WORKERS=3   (MPI_RANKS hereda WORKERS si no se pasa)"
 	@echo ""
-	@echo "  make data | make benchmark | make plots | make clean"
+	@echo "  make data | make test-args | make benchmark | make plots | make clean"
 
 data-100:
-	python data/scripts/generate_dataset.py --name synthetic_CRC100x500_balanced \
+	$(PYTHON) data/scripts/generate_dataset.py --name synthetic_CRC100x500_balanced \
 		--n-eval 100 --n-ref 200 --seed $(SEED) --allow-small
 
 data-2000: data
 
 data:
-	python data/scripts/generate_dataset.py --seed $(SEED)
+	$(PYTHON) data/scripts/generate_dataset.py --seed $(SEED)
 
 # ── Python ──────────────────────────────────────────────────────────
 
 python-sequential:
 	@echo ">> python-sequential: K=$(K) search=$(SEARCH) data=$(NORM_DATA_DIR)"
-	python python/sequential.py $(RUN_ARGS)
+	$(PYTHON) python/sequential.py $(RUN_ARGS)
 
 python-multicore:
 	@echo ">> python-multicore: K=$(K) workers=$(WORKERS) search=$(SEARCH) data=$(NORM_DATA_DIR)"
-	python python/multicore.py $(RUN_ARGS) --workers $(WORKERS)
+	$(PYTHON) python/multicore.py $(RUN_ARGS) --workers $(WORKERS)
 
 python-pycuda:
 	@echo ">> python-pycuda: K=$(K) data=$(NORM_DATA_DIR)"
-	python CUDA/scoring_pycuda.py --k $(K) --seed $(SEED) --data-dir $(NORM_DATA_DIR)
+	$(PYTHON) CUDA/scoring_pycuda.py --k $(K) --seed $(SEED) --data-dir $(NORM_DATA_DIR)
 
 # ── C ───────────────────────────────────────────────────────────────
 
@@ -128,11 +130,11 @@ benchmark:
 	echo "implementation,parallel_units,n_items,k,time_sec,auc,consistency,w1,w2,w3,seed,search_mode,iterations_until_best" > "$$RAW"; \
 	ARGS="--k $(K) --seed $(SEED) --data-dir $(NORM_DATA_DIR) --step $(STEP)"; \
 	for mode in random grid hybrid; do \
-	  python python/sequential.py $$ARGS --search $$mode --csv >> "$$RAW"; \
+	  $(PYTHON) python/sequential.py $$ARGS --search $$mode --csv >> "$$RAW"; \
 	done; \
 	for w in $(WORKERS_LIST); do \
 	  for mode in random grid hybrid; do \
-	    python python/multicore.py $$ARGS --search $$mode --workers $$w --csv >> "$$RAW"; \
+	    $(PYTHON) python/multicore.py $$ARGS --search $$mode --workers $$w --csv >> "$$RAW"; \
 	  done; \
 	done; \
 	if [ -x C_OpenMP_MPI/scoring_openmp ]; then \
@@ -152,14 +154,17 @@ benchmark:
 	if command -v nvcc >/dev/null 2>&1 && $(MAKE) -C CUDA scoring_cuda >/dev/null 2>&1; then \
 	  ./CUDA/scoring_cuda --k $(K) --seed $(SEED) --data-dir $(NORM_DATA_DIR) >> "$$RAW" || true; \
 	else echo "[WARN] CUDA C omitido." >&2; fi; \
-	if python -c 'import pycuda.autoinit' >/dev/null 2>&1; then \
-	  python CUDA/scoring_pycuda.py --k $(K) --seed $(SEED) --data-dir $(NORM_DATA_DIR) --csv >> "$$RAW" || true; \
+	if $(PYTHON) -c 'import pycuda.autoinit' >/dev/null 2>&1; then \
+	  $(PYTHON) CUDA/scoring_pycuda.py --k $(K) --seed $(SEED) --data-dir $(NORM_DATA_DIR) --csv >> "$$RAW" || true; \
 	else echo "[WARN] PyCUDA omitido." >&2; fi; \
-	python scripts/postprocess_benchmark.py --input "$$RAW" --output "$$OUT"; \
+	$(PYTHON) scripts/postprocess_benchmark.py --input "$$RAW" --output "$$OUT"; \
 	echo "Benchmark consolidado: $$OUT"
 
 plots:
-	python scripts/plot_benchmark.py --input results/benchmark.csv --out-dir results/plots
+	$(PYTHON) scripts/plot_benchmark.py --input results/benchmark.csv --out-dir results/plots
+
+test-args:
+	@bash scripts/test_args.sh
 
 clean:
 	$(MAKE) -C C_OpenMP_MPI clean || true
