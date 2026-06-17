@@ -131,3 +131,8 @@ void   evaluate(const double *A, int n_samples, int n_items,
                 const double *profiles, const int *y,
                 const double w[3],
                 double *out_auc, double *out_cons);
+
+/**
+ * @brief Resuelve directorio de datos desde `--data-dir` o `--data` (alias).
+ */
+const char *parse_data_dir(int argc, char **argv);

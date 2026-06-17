@@ -59,6 +59,25 @@ static void log_search_mode(const char *mode, double step) {
         fprintf(stderr, "  search=%s\n", mode);
 }
 
+static void try_log_global_improvement(Best *global, long iter, long k,
+                                       double auc, double cons, const double w[3],
+                                       int worker_id, int live) {
+    if (!live) return;
+    #pragma omp critical(log_improve)
+    {
+        if (auc > global->auc) {
+            double prev = global->auc;
+            global->auc  = auc;
+            global->cons = cons;
+            global->w[0] = w[0];
+            global->w[1] = w[1];
+            global->w[2] = w[2];
+            global->iter = iter;
+            log_improvement(iter, k, auc, prev, cons, w, worker_id);
+        }
+    }
+}
+
 /* ================================================================== */
 /*  Resultado por hilo (para worker_report)                            */
 /* ================================================================== */
@@ -115,6 +134,10 @@ static Best random_search_openmp(const Dataset *ds, long k, uint64_t seed,
             simplex(pcg, w);
             evaluate(ds->A, ds->n_samples, ds->n_items,
                      ds->profiles, ds->y, w, &auc_val, &cons_val);
+
+            if (verbose)
+                try_log_global_improvement(&global_best, i, k,
+                                           auc_val, cons_val, w, tid, 1);
 
             /* Solo mejor local (sin acceso shared) */
             if (auc_val > local_best.auc) {
@@ -216,6 +239,10 @@ static Best grid_search_openmp(const Dataset *ds, double step,
             evaluate(ds->A, ds->n_samples, ds->n_items,
                      ds->profiles, ds->y, grid[i], &auc_val, &cons_val);
 
+            if (verbose)
+                try_log_global_improvement(&global_best, i, total,
+                                           auc_val, cons_val, grid[i], tid, 1);
+
             if (auc_val > local_best.auc) {
                 local_best.auc  = auc_val;
                 local_best.cons = cons_val;
@@ -314,6 +341,10 @@ static Best hybrid_search_openmp(const Dataset *ds, long k, uint64_t seed,
                 evaluate(ds->A, ds->n_samples, ds->n_items,
                          ds->profiles, ds->y, w, &auc_val, &cons_val);
 
+                if (verbose)
+                    try_log_global_improvement(&global_best, grid_total + i, k,
+                                               auc_val, cons_val, w, tid, 1);
+
                 if (auc_val > local_best.auc) {
                     local_best.auc  = auc_val;
                     local_best.cons = cons_val;
@@ -389,6 +420,10 @@ static Best hybrid_search_openmp(const Dataset *ds, long k, uint64_t seed,
                     evaluate(ds->A, ds->n_samples, ds->n_items,
                              ds->profiles, ds->y, w, &auc_val, &cons_val);
 
+                    if (verbose)
+                        try_log_global_improvement(&global_best, base + i, k,
+                                                   auc_val, cons_val, w, tid, 1);
+
                     if (auc_val > local_best.auc) {
                         local_best.auc  = auc_val;
                         local_best.cons = cons_val;
@@ -436,9 +471,12 @@ static Best hybrid_search_openmp(const Dataset *ds, long k, uint64_t seed,
 int main(int argc, char **argv) {
     long K         = atol(arg(argc, argv, "--k",         "10000"));
     int  seed      = atoi(arg(argc, argv, "--seed",      "42"));
-    const char *data_dir = arg(argc, argv, "--data-dir", "data");
+    const char *data_dir = parse_data_dir(argc, argv);
     const char *search   = arg(argc, argv, "--search",   "random");
     double step          = atof(arg(argc, argv, "--step", "0.02"));
+    const char *threads_arg = arg(argc, argv, "--threads", NULL);
+    if (threads_arg)
+        omp_set_num_threads(atoi(threads_arg));
 
     /* Cargar datos (serial) */
     Dataset ds;

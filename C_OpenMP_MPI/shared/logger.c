@@ -67,12 +67,12 @@ void log_header(const char *impl, int n_items, long k) {
 
 void log_improvement(long iteration, long k,
                      double auc, double prev_auc,
-                     double cons, const double w[3])
+                     double cons, const double w[3],
+                     int worker_id)
 {
     /*
      * Formato (idéntico a logger.py::_improvement_line):
-     *   -> AUC 0.755600  (+0.000400)  iter 64/10000  consist=0.7300  w=[0.5954 0.1198 0.2848]
-     *   -> AUC 0.721200  (initial)    iter 0/10000   consist=0.6800  w=[0.3374 0.3279 0.3347]
+     *   -> [W2] AUC 0.755600  (+0.000400)  iter 64/10000 (0.6%)  consist=0.7300  w=[...]
      */
     _improvement_count++;
     _best_auc = auc;
@@ -86,13 +86,17 @@ void log_improvement(long iteration, long k,
         delta_str = delta_buf;
     }
 
-    printf("  " ANSI_GOLD "->" ANSI_RESET "  "
-           ANSI_BOLD "AUC %.6f" ANSI_RESET "  "
+    double pct = (k > 0) ? 100.0 * (iteration + 1) / (double)k : 0.0;
+
+    printf("  " ANSI_GOLD "->" ANSI_RESET "  ");
+    if (worker_id >= 0)
+        printf(ANSI_DIM ANSI_CYAN "[W%d]" ANSI_RESET "  ", worker_id);
+    printf(ANSI_BOLD "AUC %.6f" ANSI_RESET "  "
            ANSI_GREEN "(%s)" ANSI_RESET "  "
-           "iter %ld/%ld  "
+           "iter %ld/%ld (%.1f%%)  "
            "consist=%.4f  "
            "w=[%.4f %.4f %.4f]\n",
-           auc, delta_str, iteration, k, cons,
+           auc, delta_str, iteration, k, pct, cons,
            w[0], w[1], w[2]);
 }
 

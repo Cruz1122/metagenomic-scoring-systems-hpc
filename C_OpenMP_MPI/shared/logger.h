@@ -31,10 +31,12 @@ void log_header(const char *impl, int n_items, long k);
  * @param prev_auc   AUC anterior (para el delta).
  * @param cons       Consistencia asociada.
  * @param w          Pesos que produjeron la mejora.
+ * @param worker_id  ID del worker (-1 = sin etiqueta, p.ej. secuencial).
  */
 void log_improvement(long iteration, long k,
                      double auc, double prev_auc,
-                     double cons, const double w[3]);
+                     double cons, const double w[3],
+                     int worker_id);
 
 /**
  * @brief Imprime resumen final con recuadro.
