@@ -23,7 +23,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -500,23 +499,6 @@ def write_dataset(
         json.dump(manifest, f, indent=2, ensure_ascii=False)
 
 
-def mirror_to_data_root(output_dir: Path, data_root: Path) -> None:
-    """Opcional: copia salidas a data/csv, data/npy y data/dataset_manifest.json."""
-    src_csv = output_dir / "csv"
-    src_npy = output_dir / "npy"
-    dst_csv = data_root / "csv"
-    dst_npy = data_root / "npy"
-
-    if dst_csv.exists():
-        shutil.rmtree(dst_csv)
-    if dst_npy.exists():
-        shutil.rmtree(dst_npy)
-
-    shutil.copytree(src_csv, dst_csv)
-    shutil.copytree(src_npy, dst_npy)
-    shutil.copy2(output_dir / "dataset_manifest.json", data_root / "dataset_manifest.json")
-
-
 def validate_dataset(A: np.ndarray, y: np.ndarray, profiles: np.ndarray, min_eval: int, n_items: int) -> dict[str, Any]:
     row_sums = A.sum(axis=1)
     validation = {
@@ -740,9 +722,6 @@ def build_dataset(args: argparse.Namespace) -> Path:
         write_matrix_csv=not args.no_matrix_csv,
     )
 
-    if args.write_root_copy:
-        mirror_to_data_root(output_dir, Path("data"))
-
     print(f"Dataset generado: {output_dir}")
     print(f"A_eval: {A_eval.shape} {A_eval.dtype}")
     print(
@@ -761,9 +740,6 @@ def build_dataset(args: argparse.Namespace) -> Path:
     )
     if qe["best_w"] is not None:
         print("best_w:", " ".join(f"{x:.4f}" for x in qe["best_w"]))
-
-    if args.write_root_copy:
-        print("Copia legacy escrita en data/csv, data/npy y data/dataset_manifest.json")
 
     return output_dir
 
@@ -787,7 +763,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path, default=Path("data") / "processed")
     parser.add_argument("--quick-k", type=int, default=500, help="K de random search para sanity check; 0 lo desactiva.")
     parser.add_argument("--allow-small", action="store_true", help="Permite n-eval < 2000 solo para pruebas.")
-    parser.add_argument("--write-root-copy", action="store_true", help="Copia también a data/csv, data/npy y data/dataset_manifest.json.")
     parser.add_argument("--no-matrix-csv", action="store_true", help="Omite csv/matrix_A.csv; conserva npy/matrix_A.npy. Recomendado para 2000x10000 si el repo no debe inflarse.")
     return parser.parse_args()
 

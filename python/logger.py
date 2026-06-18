@@ -131,7 +131,7 @@ class Log:
             f'consist={consistency:.4f}  '
             f'w=[{w1:.4f} {w2:.4f} {w3:.4f}]'
         )
-        print(line)
+        print(line, flush=True)
 
     def _summary(self, result: 'SearchResult') -> None:
         """Resumen final con recuadro."""
@@ -178,7 +178,7 @@ class Log:
             f'w=[{w1:.4f} {w2:.4f} {w3:.4f}]  '
             f'({chunk_size} cand.){marker}'
         )
-        print(line)
+        print(line, flush=True)
 
     def improvement(self, iteration: int, auc: float,
                     consistency: float, weights: tuple,
@@ -206,3 +206,88 @@ class Log:
         """
         self.best_auc = result.auc
         self._summary(result)
+
+    # ── API PyCUDA (grilla · bloque · thread) ───────────────────────────
+
+    def cuda_info(self, device_name: str, sm_count: int, cuda_cores: int,
+                  block_size: int, blocks_per_launch: int) -> None:
+        """Imprime geometría CUDA bajo la cabecera estándar."""
+        if _SUPPORTS_UNICODE:
+            v = '│'
+        else:
+            v = '|'
+        print(S.cyan(f'  {v}  GPU ............ {device_name}'))
+        print(S.cyan(f'  {v}  SMs / cores .... {sm_count} / {cuda_cores}'))
+        print(S.cyan(f'  {v}  grid CUDA ...... {blocks_per_launch} bloques  (ceil(K/{block_size}))'))
+        print(S.cyan(f'  {v}  bloque ......... {block_size} threads'))
+        print(S.cyan(f'  {v}  thread ......... 1 candidato/hilo'))
+        print()
+        sys.stdout.flush()
+
+    def cuda_improvement(self, iteration: int, auc: float, prev_auc: float,
+                         consistency: float, weights: tuple,
+                         grilla: int, bloque: int, thread: int) -> None:
+        """Mejora global en vivo con etiqueta grilla · bloque · thread."""
+        self._count += 1
+        w1, w2, w3 = weights
+        if self._count == 1:
+            delta_str = 'initial'
+        else:
+            delta_str = f'+{auc - prev_auc:.6f}'
+        arrow = '->' if not _SUPPORTS_UNICODE else '\u279c'
+        sep = ' · ' if _SUPPORTS_UNICODE else ' / '
+        tag = f'[grilla {grilla}{sep}bloque {bloque}{sep}thread {thread}]'
+        pct = 100.0 * (iteration + 1) / self.k if self.k > 0 else 0.0
+        self.best_auc = auc
+        self.best_iter = iteration
+        line = (
+            f'  {S.gold(arrow)}  '
+            f'{S.dim(S.cyan(tag))}  '
+            f'{S.bold(f"AUC {auc:.6f}")}  '
+            f'{S.green(f"({delta_str})")}  '
+            f'iter {iteration:,}/{self.k:,} ({pct:.1f}%)  '
+            f'consist={consistency:.4f}  '
+            f'w=[{w1:.4f} {w2:.4f} {w3:.4f}]'
+        )
+        print(line, flush=True)
+
+    def cuda_progress(self, iteration: int, auc: float, consistency: float,
+                      weights: tuple) -> None:
+        """Progreso periódico cada N iteraciones (mejor global actual)."""
+        w1, w2, w3 = weights
+        pct = 100.0 * (iteration + 1) / self.k if self.k > 0 else 0.0
+        dot = '...' if not _SUPPORTS_UNICODE else '\u2026'
+        line = (
+            f'  {S.dim(f"{dot}")}  '
+            f'iter {iteration:,}/{self.k:,} ({pct:.1f}%)  '
+            f'{S.bold(f"best_AUC {auc:.6f}")}  '
+            f'consist={consistency:.4f}  '
+            f'w=[{w1:.4f} {w2:.4f} {w3:.4f}]'
+        )
+        print(line, flush=True)
+
+    def cuda_local_report(self, level: str, unit_id: int, auc: float,
+                          consistency: float, weights: tuple,
+                          chunk_size: int, is_best: bool = False,
+                          grilla: int | None = None) -> None:
+        """Reporta mejor AUC local por grilla o bloque CUDA."""
+        w1, w2, w3 = weights
+        marker = S.gold(' ★') if is_best else ''
+        if level == 'grilla':
+            label = f'[grilla {unit_id}]'
+        elif level == 'bloque':
+            if grilla is not None:
+                sep = ' · ' if _SUPPORTS_UNICODE else ' / '
+                label = f'[grilla {grilla}{sep}bloque {unit_id}]'
+            else:
+                label = f'[bloque {unit_id}]'
+        else:
+            label = f'[{level} {unit_id}]'
+        line = (
+            f'  {S.dim(S.cyan(label))}  '
+            f'{S.bold(f"AUC {auc:.6f}")}  '
+            f'consist={consistency:.4f}  '
+            f'w=[{w1:.4f} {w2:.4f} {w3:.4f}]  '
+            f'({chunk_size} cand.){marker}'
+        )
+        print(line, flush=True)
