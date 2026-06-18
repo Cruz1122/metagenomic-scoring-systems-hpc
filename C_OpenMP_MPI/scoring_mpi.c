@@ -357,24 +357,12 @@ static BestResult gather_best(BestResult local, int rank, int size,
 }
 
 /* ================================================================== */
-/*  Salida CSV                                                         */
-/* ================================================================== */
-
-static void print_csv(const char *strategy, int n_samples, int n_items,
-                       long actual_k, int workers,
-                       double time_sec, BestResult best, int seed) {
-    printf("c_mpi,%s,%d,%d,%ld,%d,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%d\n",
-           strategy, n_samples, n_items, actual_k, workers,
-           time_sec, best.auc, best.consistency,
-           best.w1, best.w2, best.w3, seed);
-}
-
-/* ================================================================== */
 /*  Estrategias: devuelven BestResult (no imprimen)                   */
 /* ================================================================== */
 
 static BestResult run_random(const Dataset *ds, long k, int seed,
-                              int rank, int size, long *out_actual_k) {
+                              int rank, int size, long *out_actual_k,
+                              int live_log) {
     double *all = NULL; long actual_k = 0;
     if (rank == 0) { all = generate_candidates_random(k, seed, &actual_k); }
     MPI_Bcast(&actual_k, 1, MPI_LONG, 0, MPI_COMM_WORLD);
@@ -382,14 +370,15 @@ static BestResult run_random(const Dataset *ds, long k, int seed,
     long nlocal = scatter_candidates(all, actual_k, &local, rank, size);
     long base = actual_k / size, rem = actual_k % size;
     long off = rank * base + (rank < rem ? rank : rem);
-    BestResult lb = evaluate_local(ds, local, nlocal, off, rank, actual_k, 1);
+    BestResult lb = evaluate_local(ds, local, nlocal, off, rank, actual_k, live_log);
     free(local); if (rank == 0) free(all);
     *out_actual_k = actual_k;
-    return gather_best(lb, rank, size, actual_k, "random");
+    return gather_best(lb, rank, size, actual_k, live_log ? "random" : NULL);
 }
 
 static BestResult run_grid_step(const Dataset *ds, double step,
-                                 int rank, int size, long *out_actual_k) {
+                                 int rank, int size, long *out_actual_k,
+                                 int live_log) {
     double *all = NULL; long actual_k = 0;
     if (rank == 0) { all = generate_candidates_grid_step(step, &actual_k); }
     MPI_Bcast(&actual_k, 1, MPI_LONG, 0, MPI_COMM_WORLD);
@@ -397,14 +386,15 @@ static BestResult run_grid_step(const Dataset *ds, double step,
     long nlocal = scatter_candidates(all, actual_k, &local, rank, size);
     long base = actual_k / size, rem = actual_k % size;
     long off = rank * base + (rank < rem ? rank : rem);
-    BestResult lb = evaluate_local(ds, local, nlocal, off, rank, actual_k, 1);
+    BestResult lb = evaluate_local(ds, local, nlocal, off, rank, actual_k, live_log);
     free(local); if (rank == 0) free(all);
     *out_actual_k = actual_k;
-    return gather_best(lb, rank, size, actual_k, "grid");
+    return gather_best(lb, rank, size, actual_k, live_log ? "grid" : NULL);
 }
 
 static BestResult run_grid(const Dataset *ds, int grid_steps,
-                            int rank, int size, long *out_actual_k) {
+                            int rank, int size, long *out_actual_k,
+                            int live_log) {
     double *all = NULL; long actual_k = 0;
     if (rank == 0) { all = generate_candidates_grid(grid_steps, &actual_k); }
     MPI_Bcast(&actual_k, 1, MPI_LONG, 0, MPI_COMM_WORLD);
@@ -412,15 +402,16 @@ static BestResult run_grid(const Dataset *ds, int grid_steps,
     long nlocal = scatter_candidates(all, actual_k, &local, rank, size);
     long base = actual_k / size, rem = actual_k % size;
     long off = rank * base + (rank < rem ? rank : rem);
-    BestResult lb = evaluate_local(ds, local, nlocal, off, rank, actual_k, 1);
+    BestResult lb = evaluate_local(ds, local, nlocal, off, rank, actual_k, live_log);
     free(local); if (rank == 0) free(all);
     *out_actual_k = actual_k;
-    return gather_best(lb, rank, size, actual_k, "grid");
+    return gather_best(lb, rank, size, actual_k, live_log ? "grid" : NULL);
 }
 
 static BestResult run_hybrid(const Dataset *ds, long k, int seed,
                               int refine_steps,
-                              int rank, int size, long *out_actual_k) {
+                              int rank, int size, long *out_actual_k,
+                              int live_log) {
     int ref_local = (refine_steps > 0) ? refine_steps : (int)(k * 0.2);
     if (ref_local < 1) ref_local = 1;
 
@@ -432,11 +423,12 @@ static BestResult run_hybrid(const Dataset *ds, long k, int seed,
     long nlr = scatter_candidates(rand_all, rand_k, &local_r, rank, size);
     long base_r = rand_k / size, rem_r = rand_k % size;
     long off_r = rank * base_r + (rank < rem_r ? rank : rem_r);
-    BestResult lb_r = evaluate_local(ds, local_r, nlr, off_r, rank, rand_k, 1);
+    BestResult lb_r = evaluate_local(ds, local_r, nlr, off_r, rank, rand_k, live_log);
     free(local_r); if (rank == 0) free(rand_all);
-    BestResult p1 = gather_best(lb_r, rank, size, rand_k, "random phase");
+    BestResult p1 = gather_best(lb_r, rank, size, rand_k,
+                                live_log ? "random phase" : NULL);
 
-    if (rank == 0)
+    if (live_log && rank == 0)
         drain_improvements(rand_k);
     MPI_Barrier(MPI_COMM_WORLD);
 
@@ -457,11 +449,12 @@ static BestResult run_hybrid(const Dataset *ds, long k, int seed,
     off_f += rand_k;
     BestResult lb_f = { -1.0, 0.0, -1, 0, 0, 0 };
     if (ref_k > 0 && nlf > 0) {
-        lb_f = evaluate_local(ds, local_f, nlf, off_f, rank, k_total, 1);
+        lb_f = evaluate_local(ds, local_f, nlf, off_f, rank, k_total, live_log);
         free(local_f);
     }
     if (rank == 0) free(ref_all);
-    BestResult p2 = gather_best(lb_f, rank, size, ref_k, "refinement phase");
+    BestResult p2 = gather_best(lb_f, rank, size, ref_k,
+                                live_log ? "refinement phase" : NULL);
 
     BestResult best = p1;
     if (p2.auc > p1.auc) best = p2;
@@ -500,13 +493,17 @@ int main(int argc, char **argv) {
     const char *data_dir   = parse_data_dir(argc, argv);
     double step            = atof(arg(argc, argv, "--step", "0.02"));
     int   grid_steps       = arg_int(argc, argv, "--grid-steps", 0);
+    int   benchmark        = cli_flag(argc, argv, "--benchmark");
+    int   live_log         = !benchmark;
 
     Dataset ds;
     if (rank == 0) {
-        if (load_data(data_dir, &ds) != 0) MPI_Abort(MPI_COMM_WORLD, 1);
-        log_header("c_mpi", ds.n_items, k);
-        log_search_mode(strategy, step);
-        live_log_reset();
+        if (load_data(data_dir, &ds, benchmark) != 0) MPI_Abort(MPI_COMM_WORLD, 1);
+        if (!benchmark) {
+            log_header("c_mpi", ds.n_items, k);
+            log_search_mode(strategy, step);
+            live_log_reset();
+        }
     }
     broadcast_problem(&ds, rank);
 
@@ -518,13 +515,13 @@ int main(int argc, char **argv) {
 
     if (strcmp(strategy, "grid") == 0) {
         if (grid_steps > 0)
-            best = run_grid(&ds, grid_steps, rank, size, &actual_k);
+            best = run_grid(&ds, grid_steps, rank, size, &actual_k, live_log);
         else
-            best = run_grid_step(&ds, step, rank, size, &actual_k);
+            best = run_grid_step(&ds, step, rank, size, &actual_k, live_log);
     } else if (strcmp(strategy, "hybrid") == 0) {
-        best = run_hybrid(&ds, k, seed, refine_steps, rank, size, &actual_k);
+        best = run_hybrid(&ds, k, seed, refine_steps, rank, size, &actual_k, live_log);
     } else {
-        best = run_random(&ds, k, seed, rank, size, &actual_k);
+        best = run_random(&ds, k, seed, rank, size, &actual_k, live_log);
     }
 
     double t1 = MPI_Wtime();
@@ -535,22 +532,26 @@ int main(int argc, char **argv) {
 
     if (rank == 0) {
         double w[3] = { best.w1, best.w2, best.w3 };
-        log_complete("c_mpi", best.auc, best.consistency, w, global_elapsed);
 
-        printf("implementation=c_mpi\n");
-        printf("search_mode=%s\n", strategy);
-        printf("workers=%d\n", size);
-        printf("N=%d\n", ds.n_items);
-        printf("K=%ld\n", actual_k);
-        printf("best_auc=%.6f\n", best.auc);
-        printf("best_w=[%.8f, %.8f, %.8f]\n", best.w1, best.w2, best.w3);
-        printf("best_w_sum=%.8f\n", best.w1 + best.w2 + best.w3);
-        if (strcmp(strategy, "grid") == 0)
-            printf("step=%.4f\n", step);
-        printf("time_sec=%.6f\n", global_elapsed);
+        if (benchmark) {
+            print_csv_row("c_mpi", size, ds.n_items, actual_k, global_elapsed,
+                          best.auc, best.consistency, w, seed, strategy,
+                          best.candidate_idx);
+        } else {
+            log_complete("c_mpi", best.auc, best.consistency, w, global_elapsed);
 
-        print_csv(strategy, ds.n_samples, ds.n_items, actual_k, size,
-                  global_elapsed, best, seed);
+            printf("implementation=c_mpi\n");
+            printf("search_mode=%s\n", strategy);
+            printf("workers=%d\n", size);
+            printf("N=%d\n", ds.n_items);
+            printf("K=%ld\n", actual_k);
+            printf("best_auc=%.6f\n", best.auc);
+            printf("best_w=[%.8f, %.8f, %.8f]\n", best.w1, best.w2, best.w3);
+            printf("best_w_sum=%.8f\n", best.w1 + best.w2 + best.w3);
+            if (strcmp(strategy, "grid") == 0)
+                printf("step=%.4f\n", step);
+            printf("time_sec=%.6f\n", global_elapsed);
+        }
     }
 
     if (rank == 0) free_dataset(&ds);

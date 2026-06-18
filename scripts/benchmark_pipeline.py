@@ -422,6 +422,13 @@ def parse_output(strategy: str, stdout: str, k_requested: int,
         gpu_mem_gb=hardware.gpu_mem_gb,
     )
 
+    if _parse_python_csv(stdout, r):
+        if not r.search_mode:
+            r.search_mode = search_mode
+        if r.n_samples > 0 and r.n_items > 0:
+            r.k_max = r.n_samples * r.n_items
+        return r
+
     if strategy == 'sequential_c':
         _parse_c_kv(stdout, r, 'c_sequential', 1)
     elif strategy == 'openmp':
@@ -443,8 +450,8 @@ def parse_output(strategy: str, stdout: str, k_requested: int,
     return r
 
 
-def _parse_python_csv(stdout: str, r: RunResult):
-    """Parsea salida de Python con --csv."""
+def _parse_python_csv(stdout: str, r: RunResult) -> bool:
+    """Parsea salida CSV estándar (--benchmark / --csv). Retorna True si encontró fila."""
     for line in stdout.splitlines():
         line = line.strip()
         if not line:
@@ -466,39 +473,11 @@ def _parse_python_csv(stdout: str, r: RunResult):
                 r.search_mode = parts[11]
                 if len(parts) > 12:
                     r.iterations_until_best = int(parts[12])
-                return
+                return True
             except (ValueError, IndexError):
                 continue
 
-    kv = _extract_kv(stdout)
-    r.implementation = kv.get('implementation', r.implementation)
-    try:
-        r.n_items = int(kv.get('N', '0'))
-    except ValueError:
-        pass
-    try:
-        r.k_max = int(kv.get('K', str(r.k_requested)))
-    except ValueError:
-        r.k_max = r.k_requested
-    try:
-        r.time_sec = float(kv.get('time_sec', '0'))
-    except ValueError:
-        pass
-    try:
-        r.best_auc = float(kv.get('best_auc', '0'))
-    except ValueError:
-        pass
-
-    w_str = kv.get('best_w', '')
-    if w_str:
-        r.best_w1, r.best_w2, r.best_w3 = _extract_weights(w_str)
-
-    cons = _extract_consistency_from_log(stdout)
-    if cons is not None:
-        r.best_consistency = cons
-
-    if 'search_mode' in kv:
-        r.search_mode = kv['search_mode']
+    return False
 
 
 def _parse_c_kv(stdout: str, r: RunResult, impl: str, units: int):
@@ -705,6 +684,7 @@ def build_command(strategy: str, k: int, seed: int,
             '--data-dir', data_dir,
             '--search', search,
             '--step', str(step),
+            '--benchmark',
         ]
 
     elif strategy == 'sequential_c':
@@ -713,6 +693,7 @@ def build_command(strategy: str, k: int, seed: int,
             '--k', str(k),
             '--seed', str(seed),
             '--data-dir', data_dir,
+            '--benchmark',
         ]
 
     elif strategy == 'multiprocessing_python':
@@ -725,6 +706,7 @@ def build_command(strategy: str, k: int, seed: int,
             '--search', search,
             '--step', str(step),
             '--workers', str(workers),
+            '--benchmark',
         ]
 
     elif strategy == 'openmp':
@@ -736,6 +718,7 @@ def build_command(strategy: str, k: int, seed: int,
             '--search', search,
             '--step', str(step),
             '--threads', str(workers),
+            '--benchmark',
         ]
 
     elif strategy == 'mpi':
@@ -748,6 +731,7 @@ def build_command(strategy: str, k: int, seed: int,
             '--data-dir', data_dir,
             '--search', search,
             '--step', str(step),
+            '--benchmark',
         ]
 
     elif strategy == 'pycuda':
@@ -760,7 +744,7 @@ def build_command(strategy: str, k: int, seed: int,
             '--search', search,
             '--block-size', str(block_size),
             '--batch-size', str(batch_size),
-            '--csv',
+            '--benchmark',
         ]
 
     raise ValueError(f'Estrategia desconocida: {strategy}')

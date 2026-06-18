@@ -475,17 +475,20 @@ int main(int argc, char **argv) {
     const char *search   = arg(argc, argv, "--search",   "random");
     double step          = atof(arg(argc, argv, "--step", "0.02"));
     const char *threads_arg = arg(argc, argv, "--threads", NULL);
+    int  benchmark       = cli_flag(argc, argv, "--benchmark");
+    int  verbose         = !benchmark;
     if (threads_arg)
         omp_set_num_threads(atoi(threads_arg));
 
     /* Cargar datos (serial) */
     Dataset ds;
-    if (load_data(data_dir, &ds) != 0)
+    if (load_data(data_dir, &ds, benchmark) != 0)
         return 1;
 
-    /* Logger: cabecera */
-    log_header("c_openmp", ds.n_items, K);
-    log_search_mode(search, step);
+    if (!benchmark) {
+        log_header("c_openmp", ds.n_items, K);
+        log_search_mode(search, step);
+    }
 
     /* Cronometrar búsqueda */
     struct timespec t0, t1;
@@ -495,34 +498,38 @@ int main(int argc, char **argv) {
     long actual_k = K;
 
     if (strcmp(search, "grid") == 0) {
-        best = grid_search_openmp(&ds, step, 1, &actual_k);
+        best = grid_search_openmp(&ds, step, verbose, &actual_k);
     } else if (strcmp(search, "hybrid") == 0) {
-        best = hybrid_search_openmp(&ds, K, (uint64_t)seed, step, 1);
+        best = hybrid_search_openmp(&ds, K, (uint64_t)seed, step, verbose);
     } else {
-        best = random_search_openmp(&ds, K, (uint64_t)seed, 1);
+        best = random_search_openmp(&ds, K, (uint64_t)seed, verbose);
     }
 
     clock_gettime(CLOCK_MONOTONIC, &t1);
     double elapsed = (t1.tv_sec - t0.tv_sec)
                    + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
 
-    /* Logger: resumen */
-    log_complete("c_openmp", best.auc, best.cons, best.w, elapsed);
+    if (benchmark) {
+        print_csv_row("c_openmp", omp_get_max_threads(), ds.n_items, actual_k,
+                      elapsed, best.auc, best.cons, best.w, seed, search,
+                      best.iter);
+    } else {
+        log_complete("c_openmp", best.auc, best.cons, best.w, elapsed);
 
-    /* Salida parseable (formato compatible con sequential + extras) */
-    printf("implementation=c_openmp\n");
-    printf("search_mode=%s\n", search);
-    printf("workers=%d\n", omp_get_max_threads());
-    printf("N=%d\n", ds.n_items);
-    printf("K=%ld\n", actual_k);
-    printf("best_auc=%.6f\n", best.auc);
-    printf("best_w=[%.8f, %.8f, %.8f]\n",
-           best.w[0], best.w[1], best.w[2]);
-    printf("best_w_sum=%.8f\n",
-           best.w[0] + best.w[1] + best.w[2]);
-    if (strcmp(search, "grid") == 0)
-        printf("step=%.4f\n", step);
-    printf("time_sec=%.6f\n", elapsed);
+        printf("implementation=c_openmp\n");
+        printf("search_mode=%s\n", search);
+        printf("workers=%d\n", omp_get_max_threads());
+        printf("N=%d\n", ds.n_items);
+        printf("K=%ld\n", actual_k);
+        printf("best_auc=%.6f\n", best.auc);
+        printf("best_w=[%.8f, %.8f, %.8f]\n",
+               best.w[0], best.w[1], best.w[2]);
+        printf("best_w_sum=%.8f\n",
+               best.w[0] + best.w[1] + best.w[2]);
+        if (strcmp(search, "grid") == 0)
+            printf("step=%.4f\n", step);
+        printf("time_sec=%.6f\n", elapsed);
+    }
 
     free_dataset(&ds);
     return 0;

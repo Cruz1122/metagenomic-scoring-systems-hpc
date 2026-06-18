@@ -21,33 +21,33 @@ python data/scripts/generate_data.py --seed "$SEED"
 echo "implementation,parallel_units,n_items,k,time_sec,auc,consistency,w1,w2,w3,seed,search_mode,iterations_until_best" > "$RAW"
 
 # 3. Python secuencial — random baseline
-python python/sequential.py --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --search random --csv >> "$RAW"
+python python/sequential.py --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --search random --benchmark >> "$RAW"
 
 # 3b. Python secuencial — grid search
-python python/sequential.py --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --search grid --csv >> "$RAW"
+python python/sequential.py --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --search grid --benchmark >> "$RAW"
 
 # 3c. Python secuencial — hybrid search
-python python/sequential.py --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --search hybrid --csv >> "$RAW"
+python python/sequential.py --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --search hybrid --benchmark >> "$RAW"
 
 # 4. Python multi-core — random search
 for W in $WORKERS_LIST; do
-  python python/multicore.py --k "$K" --seed "$SEED" --workers "$W" --data-dir "$DATA_DIR" --csv >> "$RAW"
+  python python/multicore.py --k "$K" --seed "$SEED" --workers "$W" --data-dir "$DATA_DIR" --benchmark >> "$RAW"
 done
 
 # 4b. Python multi-core — grid search
 for W in $WORKERS_LIST; do
-  python python/multicore.py --k "$K" --seed "$SEED" --workers "$W" --data-dir "$DATA_DIR" --search grid --csv >> "$RAW"
+  python python/multicore.py --k "$K" --seed "$SEED" --workers "$W" --data-dir "$DATA_DIR" --search grid --benchmark >> "$RAW"
 done
 
 # 4c. Python multi-core — hybrid search
 for W in $WORKERS_LIST; do
-  python python/multicore.py --k "$K" --seed "$SEED" --workers "$W" --data-dir "$DATA_DIR" --search hybrid --csv >> "$RAW"
+  python python/multicore.py --k "$K" --seed "$SEED" --workers "$W" --data-dir "$DATA_DIR" --search hybrid --benchmark >> "$RAW"
 done
 
 # 5. C OpenMP
 if command -v gcc >/dev/null 2>&1 && make -C C_OpenMP_MPI scoring_openmp >/dev/null 2>&1; then
   for T in $THREADS_LIST; do
-    ./C_OpenMP_MPI/scoring_openmp --k "$K" --seed "$SEED" --threads "$T" --data-dir "$DATA_DIR" >> "$RAW"
+    ./C_OpenMP_MPI/scoring_openmp --k "$K" --seed "$SEED" --threads "$T" --data-dir "$DATA_DIR" --benchmark >> "$RAW"
   done
 else
   echo "[WARN] OpenMP no disponible; omitido." >&2
@@ -57,11 +57,11 @@ fi
 if command -v mpicc >/dev/null 2>&1 && command -v mpirun >/dev/null 2>&1 && make -C C_OpenMP_MPI scoring_mpi >/dev/null 2>&1; then
   for R in $MPI_RANKS_LIST; do
     # random
-    mpirun --allow-run-as-root -np "$R" ./C_OpenMP_MPI/scoring_mpi --strategy random --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" >> "$RAW" || true
+    mpirun --allow-run-as-root -np "$R" ./C_OpenMP_MPI/scoring_mpi --strategy random --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --benchmark >> "$RAW" || true
     # grid
-    mpirun --allow-run-as-root -np "$R" ./C_OpenMP_MPI/scoring_mpi --strategy grid --grid-steps 141 --data-dir "$DATA_DIR" >> "$RAW" || true
+    mpirun --allow-run-as-root -np "$R" ./C_OpenMP_MPI/scoring_mpi --strategy grid --grid-steps 141 --data-dir "$DATA_DIR" --benchmark >> "$RAW" || true
     # hybrid
-    mpirun --allow-run-as-root -np "$R" ./C_OpenMP_MPI/scoring_mpi --strategy hybrid --k "$K" --seed "$SEED" --refine-steps 2000 --data-dir "$DATA_DIR" >> "$RAW" || true
+    mpirun --allow-run-as-root -np "$R" ./C_OpenMP_MPI/scoring_mpi --strategy hybrid --k "$K" --seed "$SEED" --refine-steps 2000 --data-dir "$DATA_DIR" --benchmark >> "$RAW" || true
   done
 else
   echo "[WARN] MPI no disponible; omitido." >&2
@@ -76,7 +76,7 @@ fi
 
 # 8. PyCUDA
 if python -c 'import pycuda.autoinit' >/dev/null 2>&1; then
-  python CUDA/scoring_pycuda.py --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --csv >> "$RAW" || true
+  python CUDA/scoring_pycuda.py --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --benchmark >> "$RAW" || true
 else
   echo "[WARN] PyCUDA no disponible; omitido." >&2
 fi
