@@ -695,6 +695,12 @@ def _resolution_for_K(K):
     return max(int(math.sqrt(2.0 * K)), 1)
 
 
+def _grid_candidate_count(K_hint, grid_resolution=0):
+    """Candidatos reales del grid (puede superar K_hint)."""
+    resolution = grid_resolution if grid_resolution > 0 else _resolution_for_K(K_hint)
+    return _generate_grid(resolution)[1]
+
+
 def _generate_random_weights(K, seed):
     rng = np.random.default_rng(seed)
     return rng.dirichlet(np.ones(3), size=K).astype(np.float32)
@@ -821,11 +827,15 @@ def timed_search(name, sm_count, A, y, profiles, K, seed,
                  log=None, search_mode='random', block_size=DEFAULT_BLOCK_SIZE,
                  mode='full', grid_resolution=0, step=0.02, fast=False):
     """Ejecuta búsqueda con medición de tiempo. El AUC se calcula en GPU."""
-    ctx = GPUContext.create(A, y, profiles, k_max=K, mode=mode, block_size=block_size)
+    k_max = K
+    if search_mode == 'grid':
+        k_max = max(K, _grid_candidate_count(K, grid_resolution))
+
+    ctx = GPUContext.create(A, y, profiles, k_max=k_max, mode=mode, block_size=block_size)
 
     tracker = None
     if not fast:
-        tracker = _CudaTracker(log, block_size, K)
+        tracker = _CudaTracker(log, block_size, k_max)
 
     if log is not None:
         _log_search_mode(search_mode, step, fast)

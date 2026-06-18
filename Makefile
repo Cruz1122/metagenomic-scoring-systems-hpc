@@ -136,8 +136,8 @@ c-mpi:
 
 c-sequential-benchmark:
 	@test -x C_OpenMP_MPI/scoring_sequential || { echo "ERROR: binario no encontrado — ejecuta 'make c'"; exit 1; }
-	@echo ">> c-sequential-benchmark: K=$(K) seed=$(SEED) data=$(NORM_DATA_DIR)"
-	./C_OpenMP_MPI/scoring_sequential --k $(K) --seed $(SEED) --data-dir $(NORM_DATA_DIR) --benchmark
+	@echo ">> c-sequential-benchmark: K=$(K) search=$(SEARCH) data=$(NORM_DATA_DIR)"
+	./C_OpenMP_MPI/scoring_sequential $(RUN_ARGS) --benchmark
 
 c-openmp-benchmark:
 	@test -x C_OpenMP_MPI/scoring_openmp || { echo "ERROR: binario no encontrado — ejecuta 'make c'"; exit 1; }

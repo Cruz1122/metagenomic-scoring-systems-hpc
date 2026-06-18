@@ -753,6 +753,8 @@ def build_command(strategy: str, k: int, seed: int,
             '--k', str(k),
             '--seed', str(seed),
             '--data-dir', data_dir,
+            '--search', search,
+            '--step', str(step),
             '--benchmark',
         ]
 
