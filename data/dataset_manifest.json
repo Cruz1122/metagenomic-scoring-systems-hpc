@@ -1,1 +1,72 @@
-processed/synthetic_CRC2000x500_balanced/dataset_manifest.json
+{
+  "dataset_name": "synthetic_CRC2000x10000_balanced",
+  "dataset_type": "synthetic-compatible-scaled",
+  "disease_task": "colorectal_cancer_vs_healthy",
+  "positive_class": "CRC",
+  "negative_class": "healthy/control",
+  "seed": 42,
+  "n_eval_samples": 2000,
+  "n_eval_healthy": 1000,
+  "n_eval_crc": 1000,
+  "n_ref_samples": 1000,
+  "n_ref_healthy": 500,
+  "n_ref_crc": 500,
+  "n_items": 10000,
+  "n_crc_enriched_true": 300,
+  "n_healthy_enriched_true": 300,
+  "n_neutral_true": 9400,
+  "signal": 0.35,
+  "t_strength": 0.8,
+  "metadata_strength": 0.07,
+  "metadata_fraction": 0.16,
+  "functional_overlap": 0.22,
+  "zero_inflation": 0.12,
+  "noise_sigma": 0.5,
+  "abundance_type": "relative_abundance_synthetic",
+  "abundance_model": "gamma base abundance + lognormal sample noise + class factor + metadata factor + row normalization",
+  "T_formula": "T = clip(0.5 + t_strength * ((0.5 + 0.5*tanh(log2fc_ref/2)) - 0.5), 0, 1)",
+  "T_source": "estimated from independent REF cohort only",
+  "S_formula": "S = 0.5 + 0.5*corr(A_ref[:, i], metadata_risk_ref)",
+  "S_source": "estimated from REF metadata only; disease label not used",
+  "F_formula": "controlled functional proxy from item group with functional_overlap",
+  "F_source": "synthetic functional markers with controlled overlap",
+  "reference_split_note": "T and S are computed from REF. EVAL is exported for benchmark to avoid label leakage.",
+  "matrix_A_csv_written": true,
+  "validation": {
+    "A_shape": [
+      2000,
+      10000
+    ],
+    "labels_shape": [
+      2000
+    ],
+    "profiles_TSF_shape": [
+      10000,
+      3
+    ],
+    "n_healthy": 1000,
+    "n_crc": 1000,
+    "row_sum_min": 0.9999998807907104,
+    "row_sum_max": 1.0000001192092896,
+    "profiles_min": 0.10158631205558777,
+    "profiles_max": 0.8730771541595459,
+    "A_nonnegative": true,
+    "profiles_in_unit_interval": true,
+    "rows_sum_to_one": true,
+    "balanced_labels": true,
+    "min_eval_ok": true,
+    "n_items_ok": true
+  },
+  "quick_eval": {
+    "T_only_auc": 0.7312345,
+    "S_only_auc": 0.6933645,
+    "F_only_auc": 0.7224605,
+    "equal_auc": 0.7710555,
+    "best_auc": 0.792748,
+    "best_w": [
+      0.4614786207675934,
+      0.40406572818756104,
+      0.13445566594600677
+    ]
+  }
+}
