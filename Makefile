@@ -11,9 +11,7 @@ MPI_RANKS    ?= $(WORKERS)
 PYTHON       ?= .venv/bin/python
 DATA_DIR     ?= data/processed/synthetic_CRC2000x10000_balanced
 DATASET_SIZE ?= 2000
-WORKERS_LIST ?= 2 4
-THREADS_LIST ?= 1 2 4
-MPI_RANKS_LIST ?= 2 4
+BENCHMARK_OUT ?= results/benchmark.csv
 
 ifeq ($(DATA_DIR),)
   ifeq ($(DATASET_SIZE),100)
@@ -42,12 +40,14 @@ CUDA_HOME ?= $(shell \
   elif [ -x /usr/local/cuda/bin/nvcc ]; then echo /usr/local/cuda; \
   else echo ""; fi)
 CUDA_LIB_DIR = $(CUDA_HOME)/targets/x86_64-linux/lib
-CUDA_ENV = CUDA_HOME="$(CUDA_HOME)" PATH="$(CUDA_HOME)/bin:$$PATH" LD_LIBRARY_PATH="$(CUDA_LIB_DIR):$(CUDA_HOME)/lib64:$$LD_LIBRARY_PATH"
+CUDA_ENV = CUDA_HOME="$(CUDA_HOME)" PATH="$(CUDA_HOME)/bin:$$PATH" LD_LIBRARY_PATH="$(CUDA_LIB_DIR):$(CUDA_HOME)/lib64:$${LD_LIBRARY_PATH:-}"
 
 .PHONY: help data data-100 data-2000 \
-        python-sequential python-multicore python-pycuda \
-        c-sequential c-openmp c-mpi c-cuda \
-        c cuda benchmark plots test-args clean
+        python-sequential python-multicore python-pycuda python-pycuda-fast \
+        python-sequential-benchmark python-multicore-benchmark python-pycuda-benchmark \
+        c-sequential c-openmp c-mpi \
+        c-sequential-benchmark c-openmp-benchmark c-mpi-benchmark \
+        c benchmark plots test-args clean
 
 help:
 	@echo "Build:"
@@ -62,8 +62,14 @@ help:
 	@echo "  make c-openmp            C OpenMP          (THREADS=$(THREADS))"
 	@echo "  make c-mpi               C MPI             (MPI_RANKS=$(MPI_RANKS))"
 	@echo ""
+	@echo "Benchmark (sin logging, salida CSV):"
+	@echo "  make python-sequential-benchmark | python-multicore-benchmark | python-pycuda-benchmark"
+	@echo "  make c-sequential-benchmark | c-openmp-benchmark | c-mpi-benchmark"
+	@echo "  make benchmark  -> una corrida por implementación (SEARCH=$(SEARCH), K=$(K))"
+	@echo ""
 	@echo "Vars: K, SEED, SEARCH, STEP, DATA_DIR, THREADS, MPI_RANKS, WORKERS"
-	@echo "  make c-openmp K=500 THREADS=2 SEARCH=random"
+	@echo "  BENCHMARK_OUT (solo make benchmark)"
+	@echo "  make benchmark K=\"5000 10000 20000\" SEARCH=random"
 	@echo "  make c-mpi WORKERS=3   (MPI_RANKS hereda WORKERS si no se pasa)"
 	@echo ""
 	@echo "  make data | make test-args | make benchmark | make benchmark-all | make plots | make clean"
@@ -97,6 +103,19 @@ python-pycuda-fast:
 	@echo ">> python-pycuda-fast: K=$(K) search=$(SEARCH) data=$(NORM_DATA_DIR)"
 	$(CUDA_ENV) $(PYTHON) CUDA/scoring_pycuda.py $(RUN_ARGS) --fast
 
+python-sequential-benchmark:
+	@echo ">> python-sequential-benchmark: K=$(K) search=$(SEARCH) data=$(NORM_DATA_DIR)"
+	$(PYTHON) python/sequential.py $(RUN_ARGS) --benchmark
+
+python-multicore-benchmark:
+	@echo ">> python-multicore-benchmark: K=$(K) workers=$(WORKERS) search=$(SEARCH) data=$(NORM_DATA_DIR)"
+	$(PYTHON) python/multicore.py $(RUN_ARGS) --workers $(WORKERS) --benchmark
+
+python-pycuda-benchmark:
+	@test -n "$(CUDA_HOME)" || { echo "ERROR: nvcc no encontrado — instala CUDA toolkit (/opt/cuda)"; exit 1; }
+	@echo ">> python-pycuda-benchmark: K=$(K) search=$(SEARCH) data=$(NORM_DATA_DIR)"
+	$(CUDA_ENV) $(PYTHON) CUDA/scoring_pycuda.py $(RUN_ARGS) --benchmark
+
 # ── C ───────────────────────────────────────────────────────────────
 
 c-sequential:
@@ -115,65 +134,61 @@ c-mpi:
 	@echo ">> c-mpi: K=$(K) ranks=$(MPI_RANKS) search=$(SEARCH) data=$(NORM_DATA_DIR)"
 	mpirun --allow-run-as-root -np $(MPI_RANKS) ./C_OpenMP_MPI/scoring_mpi $(RUN_ARGS)
 
+c-sequential-benchmark:
+	@test -x C_OpenMP_MPI/scoring_sequential || { echo "ERROR: binario no encontrado — ejecuta 'make c'"; exit 1; }
+	@echo ">> c-sequential-benchmark: K=$(K) seed=$(SEED) data=$(NORM_DATA_DIR)"
+	./C_OpenMP_MPI/scoring_sequential --k $(K) --seed $(SEED) --data-dir $(NORM_DATA_DIR) --benchmark
+
+c-openmp-benchmark:
+	@test -x C_OpenMP_MPI/scoring_openmp || { echo "ERROR: binario no encontrado — ejecuta 'make c'"; exit 1; }
+	@echo ">> c-openmp-benchmark: K=$(K) threads=$(THREADS) search=$(SEARCH) data=$(NORM_DATA_DIR)"
+	./C_OpenMP_MPI/scoring_openmp $(RUN_ARGS) --threads $(THREADS) --benchmark
+
+c-mpi-benchmark:
+	@test -x C_OpenMP_MPI/scoring_mpi || { echo "ERROR: binario no encontrado — ejecuta 'make c'"; exit 1; }
+	@command -v mpirun >/dev/null || { echo "ERROR: mpirun no encontrado"; exit 1; }
+	@echo ">> c-mpi-benchmark: K=$(K) ranks=$(MPI_RANKS) search=$(SEARCH) data=$(NORM_DATA_DIR)"
+	mpirun --allow-run-as-root -np $(MPI_RANKS) ./C_OpenMP_MPI/scoring_mpi $(RUN_ARGS) --benchmark
+
 # ── Build ───────────────────────────────────────────────────────────
 
 c:
 	$(MAKE) -C C_OpenMP_MPI all
 
-# ── Benchmark completo ──────────────────────────────────────────────
+# ── Benchmark completo (scripts/benchmark_pipeline.py) ───────────────
 
 benchmark:
 	@set -euo pipefail; \
-	RAW=results/benchmark_raw.csv; \
-	OUT=results/benchmark.csv; \
-	mkdir -p results results/plots; \
-	if [ "$(DATASET_SIZE)" = "100" ] && [ ! -f "$(NORM_DATA_DIR)/dataset_manifest.json" ]; then \
-	  $(MAKE) data-100 SEED=$(SEED); \
-	elif [ "$(DATASET_SIZE)" = "2000" ] && [ ! -f "$(NORM_DATA_DIR)/dataset_manifest.json" ]; then \
+	mkdir -p results; \
+	if [ ! -f "$(NORM_DATA_DIR)/dataset_manifest.json" ] && \
+	   [ ! -f "$(NORM_DATA_DIR)/npy/matrix_A.npy" ]; then \
+	  echo ">> Generando dataset en $(NORM_DATA_DIR)..."; \
 	  $(MAKE) data SEED=$(SEED); \
 	fi; \
 	if command -v gcc >/dev/null 2>&1; then $(MAKE) c; fi; \
-	echo "implementation,parallel_units,n_items,k,time_sec,auc,consistency,w1,w2,w3,seed,search_mode,iterations_until_best" > "$$RAW"; \
-	ARGS="--k $(K) --seed $(SEED) --data-dir $(NORM_DATA_DIR) --step $(STEP)"; \
-	for mode in random grid hybrid; do \
-	  $(PYTHON) python/sequential.py $$ARGS --search $$mode --csv >> "$$RAW"; \
-	done; \
-	for w in $(WORKERS_LIST); do \
-	  for mode in random grid hybrid; do \
-	    $(PYTHON) python/multicore.py $$ARGS --search $$mode --workers $$w --csv >> "$$RAW"; \
-	  done; \
-	done; \
-	if [ -x C_OpenMP_MPI/scoring_openmp ]; then \
-	  for t in $(THREADS_LIST); do \
-	    for mode in random grid hybrid; do \
-	      ./C_OpenMP_MPI/scoring_openmp $$ARGS --search $$mode --threads $$t >> "$$RAW"; \
-	    done; \
-	  done; \
-	else echo "[WARN] OpenMP omitido." >&2; fi; \
-	if [ -x C_OpenMP_MPI/scoring_mpi ] && command -v mpirun >/dev/null 2>&1; then \
-	  for r in $(MPI_RANKS_LIST); do \
-	    for mode in random grid hybrid; do \
-	      mpirun --allow-run-as-root -np $$r ./C_OpenMP_MPI/scoring_mpi $$ARGS --search $$mode >> "$$RAW" || true; \
-	    done; \
-	  done; \
-	else echo "[WARN] MPI omitido." >&2; fi; \
-	if [ -n "$(CUDA_HOME)" ] && $(PYTHON) -c 'import pycuda.autoinit' >/dev/null 2>&1; then \
-	  CUDA_HOME="$(CUDA_HOME)" PATH="$(CUDA_HOME)/bin:$$PATH" \
-	    LD_LIBRARY_PATH="$(CUDA_LIB_DIR):$(CUDA_HOME)/lib64:$$LD_LIBRARY_PATH" \
-	    $(PYTHON) CUDA/scoring_pycuda.py $$ARGS --csv >> "$$RAW" || true; \
-	else echo "[WARN] PyCUDA omitido." >&2; fi; \
-	$(PYTHON) scripts/postprocess_benchmark.py --input "$$RAW" --output "$$OUT"; \
-	echo "Benchmark consolidado: $$OUT"
+	if [ -n "$(CUDA_HOME)" ]; then \
+	  export CUDA_HOME="$(CUDA_HOME)"; \
+	  export PATH="$(CUDA_HOME)/bin:$$PATH"; \
+	  export LD_LIBRARY_PATH="$(CUDA_LIB_DIR):$(CUDA_HOME)/lib64:$${LD_LIBRARY_PATH:-}"; \
+	fi; \
+	$(PYTHON) scripts/benchmark_pipeline.py \
+	  --all-strategies --search $(SEARCH) \
+	  --k $(K) --seed $(SEED) --data-dir $(NORM_DATA_DIR) --step $(STEP) \
+	  --output $(BENCHMARK_OUT); \
+	echo "Benchmark consolidado: $(BENCHMARK_OUT)"
 
 benchmark-all:
 	$(PYTHON) scripts/benchmark_all.py --k-list $(K_LIST) --workers $(WORKERS) --data-dir $(NORM_DATA_DIR)
 
 plots:
-	$(PYTHON) scripts/plot_benchmark.py --input results/benchmark.csv --out-dir results/plots
+	@echo "ERROR: scripts/plot_benchmark.py no existe; genera gráficas manualmente desde $(BENCHMARK_OUT)" >&2; \
+	exit 1
 
 test-args:
 	@bash scripts/test_args.sh
 
 clean:
 	$(MAKE) -C C_OpenMP_MPI clean || true
-	rm -f results/benchmark.csv results/benchmark_raw.csv results/plots/*.png
+	rm -f results/benchmark.csv results/benchmark_raw.csv \
+	      results/benchmark_pipeline.csv results/benchmark_smoke.csv \
+	      results/benchmark_run.log results/plots/*.png

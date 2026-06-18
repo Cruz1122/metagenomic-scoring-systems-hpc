@@ -170,7 +170,7 @@ def hybrid_search(A, y, profiles, k: int, seed: int,
 
     if random_n > 0:
         random_weights = rng.dirichlet(np.ones(3), size=random_n)
-        auc_val, cons_val, w, gidx, _ = _parallel_eval(
+        auc_val, cons_val, w, gidx = _parallel_eval(
             random_weights, workers, pool, A, y, profiles,
             log=log, index_offset=iteration)
         if _is_better(auc_val, cons_val, gidx,
@@ -185,7 +185,7 @@ def hybrid_search(A, y, profiles, k: int, seed: int,
                 continue
             alpha = np.maximum(np.array(best_w) * conc, 1e-3)
             local_weights = rng.dirichlet(alpha, size=count)
-            auc_val, cons_val, w, gidx, _ = _parallel_eval(
+            auc_val, cons_val, w, gidx = _parallel_eval(
                 local_weights, workers, pool, A, y, profiles,
                 log=log, index_offset=iteration)
             if _is_better(auc_val, cons_val, gidx,
@@ -252,11 +252,14 @@ def main():
     ap.add_argument('--theta', type=float, default=None,
                     help='Umbral para consistencia (default: mediana de scores del mejor W)')
     ap.add_argument('--data-dir', type=Path, default=Path('data'), help='Directorio de datos')
+    ap.add_argument('--benchmark', action='store_true',
+                    help='Modo benchmark: sin logging, salida CSV')
     ap.add_argument('--csv', action='store_true', help='Salida en CSV (formato benchmark)')
     args = ap.parse_args()
 
     A, y, profiles = load_data(args.data_dir)
-    log = None if args.csv else Log('python_multicore', A.shape[1], args.k)
+    quiet = args.benchmark or args.csv
+    log = None if quiet else Log('python_multicore', A.shape[1], args.k)
 
     result = timed_search('python_multicore', args.workers, A, y, profiles,
                           args.k, args.seed, log=log, search_mode=args.search,
@@ -267,7 +270,7 @@ def main():
     theta_val = args.theta if args.theta is not None else float(np.median(scores))
     cons_theta = _consistency_at_threshold(scores, y, theta_val)
 
-    if args.csv:
+    if quiet:
         print(result.csv_row())
     else:
         w1, w2, w3 = result.weights

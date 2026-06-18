@@ -888,6 +888,8 @@ def main():
                     help='Modo de evaluación')
     ap.add_argument('--grid-resolution', type=int, default=0,
                     help='Resolución del grid (0 = automática)')
+    ap.add_argument('--benchmark', action='store_true',
+                    help='Modo benchmark: sin logging, fast path GPU, salida CSV')
     ap.add_argument('--fast', action='store_true',
                     help='Benchmark: un launch + reduction GPU, sin logging en vivo')
     ap.add_argument('--csv', action='store_true', help='Salida en CSV')
@@ -911,7 +913,9 @@ def main():
     _validate(A, y, profiles)
 
     n_samples, n_items = A.shape
-    log = None if args.csv or args.fast else Log('pycuda', n_items, args.k)
+    quiet = args.benchmark or args.csv
+    fast = args.benchmark or args.fast
+    log = None if (quiet or fast) else Log('pycuda', n_items, args.k)
 
     sm_count, cuda_cores, blocks_per_launch = _query_gpu_info(args.block_size, args.k)
     if log is not None:
@@ -925,9 +929,9 @@ def main():
                           mode=args.mode,
                           grid_resolution=args.grid_resolution,
                           step=args.step,
-                          fast=args.fast)
+                          fast=fast)
 
-    if args.csv:
+    if quiet:
         print(result.csv_row())
     else:
         w1, w2, w3 = result.weights
@@ -938,7 +942,7 @@ def main():
         print(f'sms={result.parallel_units}')
         print(f'block_size={args.block_size}')
         print(f'grid_blocks={blocks_per_launch}')
-        print(f'fast={args.fast}')
+        print(f'fast={fast}')
         print(f'best_auc={result.auc:.6f}')
         print(f'best_w=[{w1:.8f}, {w2:.8f}, {w3:.8f}]')
         print(f'consistency={result.consistency:.4f}')

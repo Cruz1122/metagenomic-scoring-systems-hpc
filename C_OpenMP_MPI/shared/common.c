@@ -248,10 +248,12 @@ static double* load_csv_profiles(const char *path, int *rows, int *cols) {
  * @param[out] ds   Dataset recién allocado (llamar free_dataset al terminar).
  * @return          0 en éxito, -1 en error con mensaje a stderr.
  */
-int load_data(const char *data_dir, Dataset *ds) {
+int load_data(const char *data_dir, Dataset *ds, int quiet) {
     char pA[512], pY[512], pP[512];
-    fprintf(stderr, "  cargando CSV desde %s/csv/ ...\n", data_dir);
-    fflush(stderr);
+    if (!quiet) {
+        fprintf(stderr, "  cargando CSV desde %s/csv/ ...\n", data_dir);
+        fflush(stderr);
+    }
     snprintf(pA, sizeof(pA), "%s/csv/matrix_A.csv", data_dir);
     snprintf(pY, sizeof(pY), "%s/csv/samples.csv", data_dir);
     snprintf(pP, sizeof(pP), "%s/csv/item_profiles.csv", data_dir);
@@ -316,6 +318,23 @@ const char *parse_data_dir(int argc, char **argv) {
         n--;
     }
     return buf;
+}
+
+int cli_flag(int argc, char **argv, const char *name) {
+    for (int i = 1; i < argc; i++)
+        if (strcmp(argv[i], name) == 0)
+            return 1;
+    return 0;
+}
+
+void print_csv_row(const char *impl, int parallel_units, int n_items, long k,
+                   double time_sec, double auc, double consistency,
+                   const double w[3], int seed, const char *search_mode,
+                   long iter_best) {
+    printf("%s,%d,%d,%ld,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%d,%s,%ld\n",
+           impl, parallel_units, n_items, k,
+           time_sec, auc, consistency,
+           w[0], w[1], w[2], seed, search_mode, iter_best);
 }
 
 void free_dataset(Dataset *ds) {

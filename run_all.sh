@@ -1,86 +1,97 @@
 #!/usr/bin/env bash
-# run_all.sh — Pipeline completa: genera datos, ejecuta todos los implementaciones, post-procesa.
+# run_all.sh — Pipeline completa: genera datos, ejecuta implementaciones, CSV crudo.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-N_ITEMS="${N_ITEMS:-500}"
 K="${K:-10000}"
+K_LIST="${K_LIST:-$K}"
 SEED="${SEED:-42}"
-WORKERS_LIST="${WORKERS_LIST:-2 4}"
-THREADS_LIST="${THREADS_LIST:-1 2 4}"
-MPI_RANKS_LIST="${MPI_RANKS_LIST:-2 4}"
-DATA_DIR="${DATA_DIR:-data}"
+STEP="${STEP:-0.02}"
+SEARCH_LIST="${SEARCH_LIST:-random}"
+NPROC="${NPROC:-$(nproc)}"
+DATASET_SIZE="${DATASET_SIZE:-2000}"
+DATA_DIR="${DATA_DIR:-}"
+PYTHON="${PYTHON:-.venv/bin/python}"
 RAW="results/benchmark_raw.csv"
-OUT="results/benchmark.csv"
-mkdir -p results results/plots
+HEADER="implementation,parallel_units,n_items,k,time_sec,auc,consistency,w1,w2,w3,seed,search_mode,iterations_until_best"
+CSV_RE='^(python_sequential|python_multicore|c_sequential|c_openmp|c_mpi|pycuda|cuda_c),'
 
-# 1. Generar datos sintéticos
-python data/scripts/generate_data.py --seed "$SEED"
+if [ -z "$DATA_DIR" ]; then
+  if [ "$DATASET_SIZE" = "100" ]; then
+    DATA_DIR="data/processed/synthetic_CRC100x500_balanced"
+  else
+    DATA_DIR="data/processed/synthetic_CRC2000x10000_balanced"
+  fi
+fi
+DATA_DIR="${DATA_DIR%/}"
 
-# 2. Benchmark header
-echo "implementation,parallel_units,n_items,k,time_sec,auc,consistency,w1,w2,w3,seed,search_mode,iterations_until_best" > "$RAW"
+mkdir -p results
 
-# 3. Python secuencial — random baseline
-python python/sequential.py --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --search random --csv >> "$RAW"
+append_benchmark() {
+  local out err
+  out=$(mktemp)
+  err=$(mktemp)
+  set +e
+  "$@" >"$out" 2>"$err"
+  local ec=$?
+  set -e
+  if grep -qE "$CSV_RE" "$out"; then
+    grep -E "$CSV_RE" "$out" >>"$RAW"
+  else
+    echo "[WARN] Sin línea CSV (--benchmark?): $*" >&2
+    [ -s "$out" ] && tail -5 "$out" >&2
+    [ -s "$err" ] && tail -5 "$err" >&2
+  fi
+  rm -f "$out" "$err"
+  return "$ec"
+}
 
-# 3b. Python secuencial — grid search
-python python/sequential.py --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --search grid --csv >> "$RAW"
+if [ ! -f "$DATA_DIR/dataset_manifest.json" ] && [ ! -f "$DATA_DIR/npy/matrix_A.npy" ]; then
+  echo ">> Generando dataset en $DATA_DIR..."
+  "$PYTHON" data/scripts/generate_dataset.py \
+    --name synthetic_CRC2000x10000_balanced \
+    --n-eval 2000 --n-ref 1000 --n-items 10000 \
+    --seed "$SEED" --quick-k 500
+fi
 
-# 3c. Python secuencial — hybrid search
-python python/sequential.py --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --search hybrid --csv >> "$RAW"
+if command -v gcc >/dev/null 2>&1; then
+  make -C C_OpenMP_MPI all
+fi
 
-# 4. Python multi-core — random search
-for W in $WORKERS_LIST; do
-  python python/multicore.py --k "$K" --seed "$SEED" --workers "$W" --data-dir "$DATA_DIR" --csv >> "$RAW"
-done
+echo "$HEADER" >"$RAW"
+echo ">> Paralelismo máximo: NPROC=$NPROC" >&2
 
-# 4b. Python multi-core — grid search
-for W in $WORKERS_LIST; do
-  python python/multicore.py --k "$K" --seed "$SEED" --workers "$W" --data-dir "$DATA_DIR" --search grid --csv >> "$RAW"
-done
+for K in $K_LIST; do
+  echo ">> K=$K search=$SEARCH_LIST" >&2
+  COMMON=(--k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --step "$STEP")
 
-# 4c. Python multi-core — hybrid search
-for W in $WORKERS_LIST; do
-  python python/multicore.py --k "$K" --seed "$SEED" --workers "$W" --data-dir "$DATA_DIR" --search hybrid --csv >> "$RAW"
-done
+  for mode in $SEARCH_LIST; do
+    append_benchmark "$PYTHON" python/sequential.py "${COMMON[@]}" --search "$mode" --benchmark || true
 
-# 5. C OpenMP
-if command -v gcc >/dev/null 2>&1 && make -C C_OpenMP_MPI scoring_openmp >/dev/null 2>&1; then
-  for T in $THREADS_LIST; do
-    ./C_OpenMP_MPI/scoring_openmp --k "$K" --seed "$SEED" --threads "$T" --data-dir "$DATA_DIR" >> "$RAW"
+    append_benchmark "$PYTHON" python/multicore.py "${COMMON[@]}" --workers "$NPROC" --search "$mode" --benchmark || true
+
+    if [ "$mode" = "random" ] && [ -x C_OpenMP_MPI/scoring_sequential ]; then
+      append_benchmark ./C_OpenMP_MPI/scoring_sequential --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --benchmark || true
+    fi
+
+    if [ -x C_OpenMP_MPI/scoring_openmp ]; then
+      append_benchmark ./C_OpenMP_MPI/scoring_openmp "${COMMON[@]}" --threads "$NPROC" --search "$mode" --benchmark || true
+    fi
+
+    if [ -x C_OpenMP_MPI/scoring_mpi ] && command -v mpirun >/dev/null 2>&1; then
+      append_benchmark mpirun --allow-run-as-root --oversubscribe -np "$NPROC" ./C_OpenMP_MPI/scoring_mpi \
+        "${COMMON[@]}" --search "$mode" --benchmark || true
+    fi
+
+    if "$PYTHON" -c 'import pycuda.autoinit' >/dev/null 2>&1; then
+      append_benchmark "$PYTHON" CUDA/scoring_pycuda.py "${COMMON[@]}" --search "$mode" --benchmark || true
+    fi
   done
-else
-  echo "[WARN] OpenMP no disponible; omitido." >&2
+done
+
+if ! "$PYTHON" -c 'import pycuda.autoinit' >/dev/null 2>&1; then
+  echo "[WARN] PyCUDA omitido." >&2
 fi
 
-# 6. C MPI
-if command -v mpicc >/dev/null 2>&1 && command -v mpirun >/dev/null 2>&1 && make -C C_OpenMP_MPI scoring_mpi >/dev/null 2>&1; then
-  for R in $MPI_RANKS_LIST; do
-    # random
-    mpirun --allow-run-as-root -np "$R" ./C_OpenMP_MPI/scoring_mpi --strategy random --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" >> "$RAW" || true
-    # grid
-    mpirun --allow-run-as-root -np "$R" ./C_OpenMP_MPI/scoring_mpi --strategy grid --grid-steps 141 --data-dir "$DATA_DIR" >> "$RAW" || true
-    # hybrid
-    mpirun --allow-run-as-root -np "$R" ./C_OpenMP_MPI/scoring_mpi --strategy hybrid --k "$K" --seed "$SEED" --refine-steps 2000 --data-dir "$DATA_DIR" >> "$RAW" || true
-  done
-else
-  echo "[WARN] MPI no disponible; omitido." >&2
-fi
-
-# 7. CUDA C
-if command -v nvcc >/dev/null 2>&1 && make -C CUDA scoring_cuda >/dev/null 2>&1; then
-  ./CUDA/scoring_cuda --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" >> "$RAW" || true
-else
-  echo "[WARN] CUDA C no disponible; omitido." >&2
-fi
-
-# 8. PyCUDA
-if python -c 'import pycuda.autoinit' >/dev/null 2>&1; then
-  python CUDA/scoring_pycuda.py --k "$K" --seed "$SEED" --data-dir "$DATA_DIR" --csv >> "$RAW" || true
-else
-  echo "[WARN] PyCUDA no disponible; omitido." >&2
-fi
-
-# 9. Post-process (speedup, efficiency)
-python scripts/postprocess_benchmark.py --input "$RAW" --output "$OUT"
-echo "Benchmark consolidado: $OUT"
+echo "Benchmark crudo: $RAW"
+"$PYTHON" scripts/validate_benchmark_csv.py --input "$RAW"
