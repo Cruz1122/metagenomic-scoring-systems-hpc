@@ -75,7 +75,7 @@ static const char* arg(int argc, char **argv, const char *name, const char *fall
  * @param seed  Semilla RNG.
  * @return      Mejor resultado encontrado.
  */
-static Best random_search(const Dataset *ds, long k, uint64_t seed) {
+static Best random_search(const Dataset *ds, long k, uint64_t seed, int verbose) {
     /* Inicializar RNG (SeedSequence + PCG64) */
     uint64_t pcg[4];
     pcg64_seed(pcg, seed);
@@ -102,7 +102,8 @@ static Best random_search(const Dataset *ds, long k, uint64_t seed) {
             best.w[1] = w[1];
             best.w[2] = w[2];
             best.iter = i;
-            log_improvement(i, k, auc_val, prev, cons_val, w, -1);
+            if (verbose)
+                log_improvement(i, k, auc_val, prev, cons_val, w, -1);
         }
     }
 
@@ -127,38 +128,42 @@ int main(int argc, char **argv) {
     long K         = atol(arg(argc, argv, "--k",         "10000"));
     int  seed      = atoi(arg(argc, argv, "--seed",      "42"));
     const char *data_dir = parse_data_dir(argc, argv);
+    int  benchmark = cli_flag(argc, argv, "--benchmark");
 
     /* Cargar datos (solo CSV) */
     Dataset ds;
-    if (load_data(data_dir, &ds) != 0)
+    if (load_data(data_dir, &ds, benchmark) != 0)
         return 1;
 
-    /* Logger: cabecera */
-    log_header("c_sequential", ds.n_items, K);
+    if (!benchmark)
+        log_header("c_sequential", ds.n_items, K);
 
     /* Cronometrar búsqueda */
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
 
-    Best best = random_search(&ds, K, (uint64_t)seed);
+    Best best = random_search(&ds, K, (uint64_t)seed, !benchmark);
 
     clock_gettime(CLOCK_MONOTONIC, &t1);
     double elapsed = (t1.tv_sec - t0.tv_sec)
                    + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
 
-    /* Logger: resumen */
-    log_complete("c_sequential", best.auc, best.cons, best.w, elapsed);
+    if (benchmark) {
+        print_csv_row("c_sequential", 1, ds.n_items, K, elapsed,
+                      best.auc, best.cons, best.w, seed, "random", best.iter);
+    } else {
+        log_complete("c_sequential", best.auc, best.cons, best.w, elapsed);
 
-    /* Salida parseable (formato compatible con python/sequential.py) */
-    printf("implementation=c_sequential\n");
-    printf("N=%d\n", ds.n_items);
-    printf("K=%ld\n", K);
-    printf("best_auc=%.6f\n", best.auc);
-    printf("best_w=[%.8f, %.8f, %.8f]\n",
-           best.w[0], best.w[1], best.w[2]);
-    printf("best_w_sum=%.8f\n",
-           best.w[0] + best.w[1] + best.w[2]);
-    printf("time_sec=%.6f\n", elapsed);
+        printf("implementation=c_sequential\n");
+        printf("N=%d\n", ds.n_items);
+        printf("K=%ld\n", K);
+        printf("best_auc=%.6f\n", best.auc);
+        printf("best_w=[%.8f, %.8f, %.8f]\n",
+               best.w[0], best.w[1], best.w[2]);
+        printf("best_w_sum=%.8f\n",
+               best.w[0] + best.w[1] + best.w[2]);
+        printf("time_sec=%.6f\n", elapsed);
+    }
 
     free_dataset(&ds);
     return 0;

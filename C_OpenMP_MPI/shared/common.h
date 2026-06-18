@@ -69,9 +69,10 @@ typedef struct {
  *
  * @param data_dir  Directorio raíz de datos.
  * @param[out] ds   Dataset (llamar free_dataset al terminar).
+ * @param quiet     Si != 0, omitir mensajes de progreso en stderr.
  * @return          0 en éxito, -1 en error.
  */
-int    load_data(const char *data_dir, Dataset *ds);
+int    load_data(const char *data_dir, Dataset *ds, int quiet);
 
 /**
  * @brief Libera la memoria asociada a un Dataset.
@@ -136,3 +137,16 @@ void   evaluate(const double *A, int n_samples, int n_items,
  * @brief Resuelve directorio de datos desde `--data-dir` o `--data` (alias).
  */
 const char *parse_data_dir(int argc, char **argv);
+
+/**
+ * @brief Indica si un flag booleano está presente en argv (ej. `--benchmark`).
+ */
+int    cli_flag(int argc, char **argv, const char *name);
+
+/**
+ * @brief Imprime una línea CSV estándar (compatible con python/common.py::SearchResult.csv_row).
+ */
+void   print_csv_row(const char *impl, int parallel_units, int n_items, long k,
+                     double time_sec, double auc, double consistency,
+                     const double w[3], int seed, const char *search_mode,
+                     long iter_best);

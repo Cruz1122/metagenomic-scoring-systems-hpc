@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # C_OpenMP_MPI — builds sequential, OpenMP, and MPI scoring binaries.
 # Flags can be overridden from the root Makefile:
 #   make -C C_OpenMP_MPI all CFLAGS="-O3 -g" OPENMPFLAGS="-fopenmp"
@@ -11,14 +10,6 @@ OPENMPFLAGS ?= -fopenmp
 
 .PHONY: all clean mpi sequential openmp
 
-=======
-CC      ?= gcc
-MPICC   ?= mpicc
-CFLAGS  ?= -O3 -std=c11 -Wall -Wextra
-LDFLAGS ?= -lm
-.PHONY: all clean mpi
-
->>>>>>> e0180ef (Refactor sequential search implementation and update scripts)
 all: scoring_sequential scoring_openmp scoring_mpi
 
 SHARED_SRC = shared/common.c shared/ziggurat.c shared/logger.c shared/rng.c

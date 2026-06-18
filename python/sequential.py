@@ -242,21 +242,23 @@ def main():
     ap.add_argument('--step', type=float, default=0.02,
                     help='Paso del grid (default 0.02)')
     ap.add_argument('--data-dir', type=Path, default=Path('data'), help='Directorio de datos')
+    ap.add_argument('--benchmark', action='store_true',
+                    help='Modo benchmark: sin logging, salida CSV')
     ap.add_argument('--csv', action='store_true', help='Salida en CSV (formato benchmark)')
     args = ap.parse_args()
 
     # Cargar datos
     A, y, profiles = load_data(args.data_dir)
 
-    # Logger colorido (solo si no es modo CSV)
-    log = None if args.csv else Log('python_sequential', A.shape[1], args.k)
+    quiet = args.benchmark or args.csv
+    log = None if quiet else Log('python_sequential', A.shape[1], args.k)
 
     # Búsqueda con tiempo
     result = timed_search('python_sequential', 1, A, y, profiles, args.k, args.seed,
                           log=log, search_mode=args.search, step=args.step)
 
     # --- Salida ---
-    if args.csv:
+    if quiet:
         print(result.csv_row())
     else:
         w1, w2, w3 = result.weights

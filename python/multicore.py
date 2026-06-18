@@ -252,11 +252,14 @@ def main():
     ap.add_argument('--theta', type=float, default=None,
                     help='Umbral para consistencia (default: mediana de scores del mejor W)')
     ap.add_argument('--data-dir', type=Path, default=Path('data'), help='Directorio de datos')
+    ap.add_argument('--benchmark', action='store_true',
+                    help='Modo benchmark: sin logging, salida CSV')
     ap.add_argument('--csv', action='store_true', help='Salida en CSV (formato benchmark)')
     args = ap.parse_args()
 
     A, y, profiles = load_data(args.data_dir)
-    log = None if args.csv else Log('python_multicore', A.shape[1], args.k)
+    quiet = args.benchmark or args.csv
+    log = None if quiet else Log('python_multicore', A.shape[1], args.k)
 
     result = timed_search('python_multicore', args.workers, A, y, profiles,
                           args.k, args.seed, log=log, search_mode=args.search,
@@ -267,7 +270,7 @@ def main():
     theta_val = args.theta if args.theta is not None else float(np.median(scores))
     cons_theta = _consistency_at_threshold(scores, y, theta_val)
 
-    if args.csv:
+    if quiet:
         print(result.csv_row())
     else:
         w1, w2, w3 = result.weights
