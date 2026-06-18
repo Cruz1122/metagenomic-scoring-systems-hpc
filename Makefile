@@ -2,7 +2,6 @@ SHELL := /bin/bash
 
 # ── Parámetros (override: make c-openmp K=500 THREADS=2 SEARCH=random) ──
 K            ?= 10000
-K_LIST       ?= 1000,10000
 SEED         ?= 42
 SEARCH       ?= random
 STEP         ?= 0.02
@@ -10,7 +9,7 @@ WORKERS      ?= 4
 THREADS      ?= 4
 MPI_RANKS    ?= $(WORKERS)
 PYTHON       ?= .venv/bin/python
-DATA_DIR     ?=
+DATA_DIR     ?= data/processed/synthetic_CRC2000x10000_balanced
 DATASET_SIZE ?= 2000
 WORKERS_LIST ?= 2 4
 THREADS_LIST ?= 1 2 4
@@ -36,24 +35,32 @@ export CFLAGS      ?= -O3 -std=c11 -Wall -Wextra
 export LDFLAGS     ?= -lm
 export OPENMPFLAGS ?= -fopenmp
 
+# CUDA toolkit (PyCUDA JIT)
+CUDA_HOME ?= $(shell \
+  if command -v nvcc >/dev/null 2>&1; then dirname "$$(dirname "$$(command -v nvcc)")"; \
+  elif [ -x /opt/cuda/bin/nvcc ]; then echo /opt/cuda; \
+  elif [ -x /usr/local/cuda/bin/nvcc ]; then echo /usr/local/cuda; \
+  else echo ""; fi)
+CUDA_LIB_DIR = $(CUDA_HOME)/targets/x86_64-linux/lib
+CUDA_ENV = CUDA_HOME="$(CUDA_HOME)" PATH="$(CUDA_HOME)/bin:$$PATH" LD_LIBRARY_PATH="$(CUDA_LIB_DIR):$(CUDA_HOME)/lib64:$$LD_LIBRARY_PATH"
+
 .PHONY: help data data-100 data-2000 \
         python-sequential python-multicore python-pycuda \
         c-sequential c-openmp c-mpi c-cuda \
-        c cuda benchmark benchmark-all plots test-args clean
+        c cuda benchmark plots test-args clean
 
 help:
 	@echo "Build:"
 	@echo "  make c          -> compilar C secuencial + OpenMP + MPI"
-	@echo "  make cuda       -> compilar CUDA C"
 	@echo ""
 	@echo "Run (no compila; usa 'make c' antes si hace falta):"
 	@echo "  make python-sequential   Python secuencial"
 	@echo "  make python-multicore    Python multicore  (WORKERS=$(WORKERS))"
 	@echo "  make python-pycuda       PyCUDA"
+	@echo "  make python-pycuda-fast  PyCUDA (--fast, sin logging en vivo)"
 	@echo "  make c-sequential        C secuencial"
 	@echo "  make c-openmp            C OpenMP          (THREADS=$(THREADS))"
 	@echo "  make c-mpi               C MPI             (MPI_RANKS=$(MPI_RANKS))"
-	@echo "  make c-cuda              CUDA C"
 	@echo ""
 	@echo "Vars: K, SEED, SEARCH, STEP, DATA_DIR, THREADS, MPI_RANKS, WORKERS"
 	@echo "  make c-openmp K=500 THREADS=2 SEARCH=random"
@@ -68,8 +75,7 @@ data:
 	  --n-ref 1000 \
 	  --n-items 10000 \
 	  --seed $(SEED) \
-	  --quick-k 500 \
-	  --write-root-copy
+	  --quick-k 500
 
 # ── Python ──────────────────────────────────────────────────────────
 
@@ -82,8 +88,14 @@ python-multicore:
 	$(PYTHON) python/multicore.py $(RUN_ARGS) --workers $(WORKERS)
 
 python-pycuda:
-	@echo ">> python-pycuda: K=$(K) data=$(NORM_DATA_DIR)"
-	$(PYTHON) CUDA/scoring_pycuda.py --k $(K) --seed $(SEED) --data-dir $(NORM_DATA_DIR)
+	@test -n "$(CUDA_HOME)" || { echo "ERROR: nvcc no encontrado — instala CUDA toolkit (/opt/cuda)"; exit 1; }
+	@echo ">> python-pycuda: K=$(K) search=$(SEARCH) data=$(NORM_DATA_DIR)"
+	$(CUDA_ENV) $(PYTHON) CUDA/scoring_pycuda.py $(RUN_ARGS)
+
+python-pycuda-fast:
+	@test -n "$(CUDA_HOME)" || { echo "ERROR: nvcc no encontrado — instala CUDA toolkit (/opt/cuda)"; exit 1; }
+	@echo ">> python-pycuda-fast: K=$(K) search=$(SEARCH) data=$(NORM_DATA_DIR)"
+	$(CUDA_ENV) $(PYTHON) CUDA/scoring_pycuda.py $(RUN_ARGS) --fast
 
 # ── C ───────────────────────────────────────────────────────────────
 
@@ -103,18 +115,10 @@ c-mpi:
 	@echo ">> c-mpi: K=$(K) ranks=$(MPI_RANKS) search=$(SEARCH) data=$(NORM_DATA_DIR)"
 	mpirun --allow-run-as-root -np $(MPI_RANKS) ./C_OpenMP_MPI/scoring_mpi $(RUN_ARGS)
 
-c-cuda:
-	@test -x CUDA/scoring_cuda || { echo "ERROR: binario no encontrado — ejecuta 'make cuda'"; exit 1; }
-	@echo ">> c-cuda: K=$(K) data=$(NORM_DATA_DIR)"
-	./CUDA/scoring_cuda --k $(K) --seed $(SEED) --data-dir $(NORM_DATA_DIR)
-
 # ── Build ───────────────────────────────────────────────────────────
 
 c:
 	$(MAKE) -C C_OpenMP_MPI all
-
-cuda:
-	$(MAKE) -C CUDA all
 
 # ── Benchmark completo ──────────────────────────────────────────────
 
@@ -153,11 +157,10 @@ benchmark:
 	    done; \
 	  done; \
 	else echo "[WARN] MPI omitido." >&2; fi; \
-	if command -v nvcc >/dev/null 2>&1 && $(MAKE) -C CUDA scoring_cuda >/dev/null 2>&1; then \
-	  ./CUDA/scoring_cuda --k $(K) --seed $(SEED) --data-dir $(NORM_DATA_DIR) >> "$$RAW" || true; \
-	else echo "[WARN] CUDA C omitido." >&2; fi; \
-	if $(PYTHON) -c 'import pycuda.autoinit' >/dev/null 2>&1; then \
-	  $(PYTHON) CUDA/scoring_pycuda.py --k $(K) --seed $(SEED) --data-dir $(NORM_DATA_DIR) --csv >> "$$RAW" || true; \
+	if [ -n "$(CUDA_HOME)" ] && $(PYTHON) -c 'import pycuda.autoinit' >/dev/null 2>&1; then \
+	  CUDA_HOME="$(CUDA_HOME)" PATH="$(CUDA_HOME)/bin:$$PATH" \
+	    LD_LIBRARY_PATH="$(CUDA_LIB_DIR):$(CUDA_HOME)/lib64:$$LD_LIBRARY_PATH" \
+	    $(PYTHON) CUDA/scoring_pycuda.py $$ARGS --csv >> "$$RAW" || true; \
 	else echo "[WARN] PyCUDA omitido." >&2; fi; \
 	$(PYTHON) scripts/postprocess_benchmark.py --input "$$RAW" --output "$$OUT"; \
 	echo "Benchmark consolidado: $$OUT"
@@ -173,5 +176,4 @@ test-args:
 
 clean:
 	$(MAKE) -C C_OpenMP_MPI clean || true
-	$(MAKE) -C CUDA clean || true
 	rm -f results/benchmark.csv results/benchmark_raw.csv results/plots/*.png
