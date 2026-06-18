@@ -71,9 +71,7 @@ metagenomic-scoring-systems-hpc/
 │   │   └── logger.h/c          → logger ANSI
 │   └── Makefile                → compilación gcc / mpicc
 ├── CUDA/
-│   ├── scoring_kernel.cu       → [SCAFFOLD] kernel CUDA + TODO
-│   ├── scoring_pycuda.py       → [SCAFFOLD] PyCUDA + TODO
-│   └── Makefile                → compilación nvcc
+│   └── scoring_pycuda.py       → PyCUDA (kernel embebido + logger grilla/bloque/thread)
 ├── scripts/
 │   ├── postprocess_benchmark.py → [SCAFFOLD] calcula speedup/efficiency
 │   └── plot_benchmark.py        → [SCAFFOLD] gráficas de benchmark
@@ -99,7 +97,7 @@ metagenomic-scoring-systems-hpc/
 | Python | ≥ 3.10 | Baseline secuencial, multicore, PyCUDA |
 | GCC | ≥ 10 | Compilación OpenMP |
 | MPICH / OpenMPI | ≥ 3.0 | Compilación y ejecución MPI |
-| NVCC + GPU NVIDIA | ≥ 12 | Compilación CUDA C |
+| PyCUDA + CUDA toolkit | ≥ 12 | GPU scoring (`make python-pycuda`) |
 | make | ≥ 4 | Automatización |
 
 Dependencias Python:
@@ -157,14 +155,12 @@ mpirun -np 4 ./C_OpenMP_MPI/scoring_mpi --k 100000 --seed 42 --data-dir data
 ```
 > ⚠️ **Scaffold:** MPI imprime salida placeholder. Falta implementar la lógica de búsqueda distribuida.
 
-### 6. CUDA
+### 6. PyCUDA
 
 ```bash
-make cuda                       # compila kernel CUDA C
-make cuda-run K=100000
-python CUDA/scoring_pycuda.py --k 100000 --seed 42 --data-dir data
+make python-pycuda K=100000 SEED=42 SEARCH=random
+# Requiere CUDA toolkit (p. ej. /opt/cuda) y PyCUDA instalado
 ```
-> ⚠️ **Scaffold:** CUDA C y PyCUDA tienen TODOs. PyCUDA corre como fallback serial.
 
 ### 7. Benchmark integral
 
@@ -213,8 +209,7 @@ El postprocesado (`scripts/postprocess_benchmark.py`) agrega `speedup = T_seq / 
 | Python multicore | Multiprocessing | `K / workers`, seed offset 100003 | `numpy.random.default_rng` por worker | `Pool.map` |
 | C/OpenMP | Memoria compartida | `schedule(static)` sobre for loop | PCG64 por hilo (`seed + tid`) | Merge local→global post-loop vía `#pragma omp critical` |
 | C/MPI | Memoria distribuida | `chunk = ceil(K/size)` por rank | PCG64 por rank (`seed + rank`) | `MPI_Gather` / `MPI_Reduce` (scaffold) |
-| CUDA C | GPU masivo | 1 hilo = 1 candidato, grid `<K+255)/256,256>` | `mt19937_64` en host | Reducción en host (`std::max_element`) |
-| PyCUDA | GPU (float32) | 1 hilo = 1 candidato, grid `<K+255)/256,256>` | `numpy.random.default_rng` | AUC calculado en host |
+| PyCUDA | GPU (float32) | 1 thread = 1 candidato, grilla/bloque/thread | `numpy.random.default_rng` | AUC y consistencia en GPU |
 
 ---
 
@@ -252,7 +247,7 @@ make clean
 | `docs/04_python_multiprocessing.md` | Python secuencial y multiprocessing |
 | `docs/05_openmp.md` | OpenMP: RNG, patrón, métricas |
 | `docs/06_mpi.md` | MPI: scaffold, reusa shared/ |
-| `docs/07_cuda.md` | CUDA C y PyCUDA |
+| `docs/07_cuda.md` | PyCUDA |
 | `docs/08_benchmarks.md` | Pipeline de benchmark |
 | `docs/09_amdahl_gustafson.md` | Amdahl y escalabilidad débil |
 | `docs/10_entregables.md` | Entregables mínimos del proyecto |
