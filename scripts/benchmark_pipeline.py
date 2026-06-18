@@ -11,6 +11,10 @@ Uso:
       --k 5000 10000 20000
 
   python scripts/benchmark_pipeline.py \\
+      --all-strategies --search random \\
+      --k 5000 10000 20000
+
+  python scripts/benchmark_pipeline.py \\
       --strategy openmp --search hybrid \\
       --k all --workers 4
 
@@ -65,12 +69,12 @@ STRATEGY_MAP = {
     'openmp': {
         'binary': str(PROJECT_ROOT / 'C_OpenMP_MPI' / 'scoring_openmp'),
         'script': None,
-        'default_workers': 4,
+        'default_workers': max(1, os.cpu_count() or 1),
     },
     'mpi': {
         'binary': 'mpirun',
         'script': str(PROJECT_ROOT / 'C_OpenMP_MPI' / 'scoring_mpi'),
-        'default_workers': 4,
+        'default_workers': max(1, os.cpu_count() or 1),
     },
     'pycuda': {
         'binary': PYTHON,
@@ -80,6 +84,15 @@ STRATEGY_MAP = {
 }
 
 SEARCH_MODES = ('random', 'grid', 'hybrid')
+PARALLEL_STRATEGIES = frozenset({'multiprocessing_python', 'openmp', 'mpi'})
+ALL_STRATEGIES = (
+    'sequential_python',
+    'multiprocessing_python',
+    'sequential_c',
+    'openmp',
+    'mpi',
+    'pycuda',
+)
 
 
 # ── Hardware detection ──────────────────────────────────────────────────
@@ -152,83 +165,130 @@ def detect_ram_gb() -> float:
     return 0.0
 
 
-def detect_gpu_info(ram_gb: float) -> Tuple[str, int, float]:
-    model = 'none'
-    cuda_cores = 0
-    mem_gb = 0.0
+def _cuda_cores_from_name(model: str) -> int:
+    """Estima CUDA cores a partir del nombre del GPU (0 si desconocido)."""
+    model_lower = model.lower()
+    if 'a100' in model_lower:
+        return 6912
+    if 'v100' in model_lower:
+        return 5120
+    if 'titan' in model_lower:
+        return 3840
+    if 'rtx 3090' in model_lower or 'rtx3090' in model_lower:
+        return 10496
+    if 'rtx 3080' in model_lower:
+        return 8704
+    if 'rtx 3070' in model_lower:
+        return 5888
+    if 'rtx 3060' in model_lower:
+        return 3584
+    if 'rtx 2080 ti' in model_lower:
+        return 4352
+    if 'rtx 2080' in model_lower:
+        return 2944
+    if 'rtx 2070' in model_lower:
+        return 2304
+    if 'rtx 2060' in model_lower:
+        return 1920
+    if 'gtx 1080 ti' in model_lower:
+        return 3584
+    if 'gtx 1080' in model_lower:
+        return 2560
+    if 'gtx 1660' in model_lower:
+        return 1408
+    if 'gtx 1650' in model_lower:
+        return 896
+    if 'tesla t4' in model_lower or 't4' in model_lower:
+        return 2560
+    if 'p100' in model_lower:
+        return 3584
+    return 0
 
-    # 1. NVIDIA GPU via nvidia-smi
+
+def _detect_gpu_via_nvidia_smi() -> Optional[Tuple[str, int, float]]:
     try:
         result = subprocess.run(
             ['nvidia-smi', '--query-gpu=name,memory.total',
              '--format=csv,noheader,nounits'],
-            capture_output=True, text=True, timeout=10
+            capture_output=True, text=True, timeout=10,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            parts = result.stdout.strip().split(',')
-            if len(parts) >= 2:
-                model = parts[0].strip()
-                try:
-                    mem_gb = round(float(parts[1].strip()) / 1024, 1)
-                except ValueError:
-                    pass
-
-                model_lower = model.lower()
-                if 'a100' in model_lower:
-                    cuda_cores = 6912
-                elif 'v100' in model_lower:
-                    cuda_cores = 5120
-                elif 'titan' in model_lower:
-                    cuda_cores = 3840
-                elif 'rtx 3090' in model_lower or 'rtx3090' in model_lower:
-                    cuda_cores = 10496
-                elif 'rtx 3080' in model_lower:
-                    cuda_cores = 8704
-                elif 'rtx 3070' in model_lower:
-                    cuda_cores = 5888
-                elif 'rtx 3060' in model_lower:
-                    cuda_cores = 3584
-                elif 'rtx 2080 ti' in model_lower:
-                    cuda_cores = 4352
-                elif 'rtx 2080' in model_lower:
-                    cuda_cores = 2944
-                elif 'rtx 2070' in model_lower:
-                    cuda_cores = 2304
-                elif 'rtx 2060' in model_lower:
-                    cuda_cores = 1920
-                elif 'gtx 1080 ti' in model_lower:
-                    cuda_cores = 3584
-                elif 'gtx 1080' in model_lower:
-                    cuda_cores = 2560
-                elif 'gtx 1660' in model_lower:
-                    cuda_cores = 1408
-                elif 'gtx 1650' in model_lower:
-                    cuda_cores = 896
-                elif 'tesla t4' in model_lower or 't4' in model_lower:
-                    cuda_cores = 2560
-                elif 'p100' in model_lower:
-                    cuda_cores = 3584
-                else:
-                    cuda_cores = 0
-            return model, cuda_cores, mem_gb
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        line = result.stdout.strip().splitlines()[0]
+        name, _, mem_str = line.rpartition(',')
+        name = name.strip()
+        if not name:
+            return None
+        mem_gb = 0.0
+        try:
+            mem_gb = round(float(mem_str.strip()) / 1024, 1)
+        except ValueError:
+            pass
+        return name, _cuda_cores_from_name(name), mem_gb
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        pass
+        return None
 
-    # 2. No NVIDIA — buscar GPU integrada via lspci
+
+def _detect_gpu_via_pycuda() -> Optional[Tuple[str, int, float]]:
+    try:
+        import pycuda.driver as drv
+        drv.init()
+        dev = drv.Device(0)
+        raw_name = dev.name()
+        name = raw_name.decode() if isinstance(raw_name, bytes) else str(raw_name)
+        mem_gb = round(dev.total_memory() / (1024 ** 3), 1)
+        return name, _cuda_cores_from_name(name), mem_gb
+    except Exception:
+        return None
+
+
+def _lspci_gpu_desc(line: str) -> str:
+    desc = line.split(':', 2)[-1].strip() if line.count(':') >= 2 else line.strip()
+    bracket = re.search(r'\[(.+?)\]', desc)
+    if bracket:
+        return re.sub(r'\s+', ' ', bracket.group(1))
+    return re.sub(r'\s+', ' ', desc)
+
+
+def _detect_gpu_via_lspci(ram_gb: float) -> Optional[Tuple[str, int, float]]:
     try:
         result = subprocess.run(['lspci'], capture_output=True, text=True, timeout=10)
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                if 'VGA' in line or '3D' in line:
-                    desc = line.split(':', 2)[-1].strip() if ':' in line else line.strip()
-                    desc = re.sub(r'\s+', ' ', desc)
-                    model = f'integrated ({desc})'
-                    mem_gb = ram_gb
-                    break
+        if result.returncode != 0:
+            return None
+        nvidia_line = None
+        integrated_line = None
+        for line in result.stdout.splitlines():
+            lower = line.lower()
+            if not any(k in lower for k in ('vga', '3d controller', 'display controller')):
+                continue
+            if 'nvidia' in lower:
+                nvidia_line = line
+                break
+            if integrated_line is None and (
+                'intel' in lower or 'amd' in lower or 'vga' in lower
+            ):
+                integrated_line = line
+        if nvidia_line:
+            desc = _lspci_gpu_desc(nvidia_line)
+            model = desc if desc.lower().startswith('geforce') or desc.lower().startswith('quadro') else f'NVIDIA {desc}'
+            return model, _cuda_cores_from_name(model), 0.0
+        if integrated_line:
+            desc = _lspci_gpu_desc(integrated_line)
+            return f'integrated ({desc})', 0, ram_gb
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         pass
+    return None
 
-    return model, cuda_cores, mem_gb
+
+def detect_gpu_info(ram_gb: float) -> Tuple[str, int, float]:
+    for detector in (_detect_gpu_via_nvidia_smi, _detect_gpu_via_pycuda):
+        info = detector()
+        if info:
+            return info
+    info = _detect_gpu_via_lspci(ram_gb)
+    if info:
+        return info
+    return 'none', 0, 0.0
 
 
 def detect_hardware() -> HardwareInfo:
@@ -724,6 +784,8 @@ def build_command(strategy: str, k: int, seed: int,
     elif strategy == 'mpi':
         return [
             info['binary'],
+            '--allow-run-as-root',
+            '--oversubscribe',
             '-np', str(workers),
             info['script'],
             '--k', str(k),
@@ -743,7 +805,6 @@ def build_command(strategy: str, k: int, seed: int,
             '--data-dir', data_dir,
             '--search', search,
             '--block-size', str(block_size),
-            '--batch-size', str(batch_size),
             '--benchmark',
         ]
 
@@ -810,22 +871,160 @@ def resolve_data_dir(data_dir: Optional[str]) -> str:
     return str(PROJECT_ROOT / 'data')
 
 
+def resolve_parallel_units(strategy: str, hardware: HardwareInfo,
+                           workers_override: Optional[int] = None) -> int:
+    """Workers/threads/ranks: CPUs lógicos para estrategias paralelas, 1 si no."""
+    if workers_override is not None:
+        return max(1, workers_override)
+    if strategy in PARALLEL_STRATEGIES:
+        return max(1, hardware.cpu_logical_cores)
+    return 1
+
+
+def resolve_suite_strategies() -> List[str]:
+    """Estrategias disponibles para --all-strategies (omite las no instaladas)."""
+    selected: List[str] = []
+    for strategy in ALL_STRATEGIES:
+        error = check_strategy_available(strategy)
+        if error:
+            print(f'[WARN] Omitiendo {strategy}: {error}', file=sys.stderr)
+        else:
+            selected.append(strategy)
+    return selected
+
+
+def parse_k_values(k_args: List[str]) -> List[int]:
+    if len(k_args) == 1 and k_args[0].lower() == 'all':
+        return list(DEFAULT_K_VALUES)
+    k_values: List[int] = []
+    for v in k_args:
+        try:
+            k_values.append(int(v))
+        except ValueError:
+            print(f'Error: valor de K inválido: {v}', file=sys.stderr)
+            sys.exit(1)
+    return k_values
+
+
+def run_strategy_benchmark(
+    *,
+    strategy: str,
+    k_values: List[int],
+    search: str,
+    seed: int,
+    data_dir: str,
+    step: float,
+    workers: int,
+    block_size: int,
+    batch_size: int,
+    hardware: HardwareInfo,
+    n_samples: int,
+    n_items: int,
+    writer: csv.writer,
+    verbose: bool,
+) -> Tuple[int, int]:
+    """Ejecuta una estrategia para todos los K. Retorna (escritos, errores)."""
+    results_written = 0
+    errors = 0
+
+    for k_val in k_values:
+        cmd = build_command(
+            strategy=strategy,
+            k=k_val,
+            seed=seed,
+            data_dir=data_dir,
+            search=search,
+            step=step,
+            workers=workers,
+            block_size=block_size,
+            batch_size=batch_size,
+        )
+
+        label = f'{strategy} k={k_val} search={search} units={workers}'
+        print(f'\n[{label}]', file=sys.stderr)
+        if verbose:
+            print(f'  Comando: {" ".join(cmd)}', file=sys.stderr)
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=str(PROJECT_ROOT),
+            )
+            stdout_lines = []
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                if verbose:
+                    print(line, end='', flush=True)
+                stdout_lines.append(line)
+            proc.wait()
+        except FileNotFoundError as e:
+            print(f'  ERROR: comando no encontrado: {e}', file=sys.stderr)
+            errors += 1
+            continue
+
+        stderr_text = proc.stderr.read().strip() if proc.stderr else ''
+        stdout_text = ''.join(stdout_lines).strip()
+
+        if proc.returncode != 0:
+            print(f'  ERROR: código de retorno {proc.returncode}', file=sys.stderr)
+            if stderr_text:
+                for line in stderr_text.splitlines()[-5:]:
+                    print(f'  stderr: {line}', file=sys.stderr)
+            errors += 1
+            continue
+
+        run_result = parse_output(
+            strategy=strategy,
+            stdout=stdout_text,
+            k_requested=k_val,
+            seed=seed,
+            parallel_units=workers,
+            hardware=hardware,
+            search_mode=search,
+            detected_n_samples=n_samples,
+            detected_n_items=n_items,
+        )
+
+        writer.writerow(result_to_row(run_result))
+        results_written += 1
+
+        if verbose:
+            print(f'  ✓ AUC={run_result.best_auc:.6f} '
+                  f'time={run_result.time_sec:.4f}s '
+                  f'k_max={run_result.k_max} '
+                  f'iter={run_result.iterations_until_best}',
+                  file=sys.stderr)
+        else:
+            print(f'  ✓ {run_result.best_auc:.6f} AUC '
+                  f'en {run_result.time_sec:.4f}s '
+                  f'(K={run_result.k_max}, units={workers})',
+                  file=sys.stderr)
+
+    return results_written, errors
+
+
 def main():
     ap = argparse.ArgumentParser(
         description='Pipeline de benchmark para scoring metagenómico',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    ap.add_argument('--strategy', '-s', required=True,
-                    choices=list(STRATEGY_MAP.keys()),
-                    help='Estrategia a ejecutar')
+    mode = ap.add_mutually_exclusive_group(required=True)
+    mode.add_argument('--strategy', '-s',
+                      choices=list(STRATEGY_MAP.keys()),
+                      help='Estrategia a ejecutar')
+    mode.add_argument('--all-strategies', action='store_true',
+                      help='Ejecutar todas las implementaciones disponibles (una vez c/u)')
     ap.add_argument('--search', '--search-mode', required=True,
                     choices=SEARCH_MODES,
                     help='Estrategia de búsqueda de pesos')
     ap.add_argument('--k', '-k', nargs='+', required=True,
                     help='Valores de K (enteros) o "all" para valores default')
     ap.add_argument('--workers', '-w', type=int, default=None,
-                    help='Workers/threads/MPI ranks (default por estrategia)')
+                    help='Override de workers/threads/ranks (default: CPUs lógicos)')
     ap.add_argument('--data-dir', type=str, default=None,
                     help='Directorio de datos (default: auto)')
     ap.add_argument('--seed', type=int, default=42,
@@ -845,37 +1044,26 @@ def main():
                     help='Salida verbosa')
     args = ap.parse_args()
 
-    # Resolver K values
-    if len(args.k) == 1 and args.k[0].lower() == 'all':
-        k_values = DEFAULT_K_VALUES
-    else:
-        k_values = []
-        for v in args.k:
-            try:
-                k_values.append(int(v))
-            except ValueError:
-                print(f'Error: valor de K inválido: {v}', file=sys.stderr)
-                sys.exit(1)
-
-    # Resolver workers
-    default_workers = STRATEGY_MAP[args.strategy]['default_workers']
-    workers = args.workers if args.workers is not None else default_workers
-
-    # Resolver data_dir
+    k_values = parse_k_values(args.k)
     data_dir = resolve_data_dir(args.data_dir)
 
-    # Pre-flight check
-    error = check_strategy_available(args.strategy)
-    if error:
-        print(f'Error: {error}', file=sys.stderr)
-        sys.exit(1)
+    if args.all_strategies:
+        strategies = resolve_suite_strategies()
+        if not strategies:
+            print('Error: ninguna estrategia disponible', file=sys.stderr)
+            sys.exit(1)
+    else:
+        error = check_strategy_available(args.strategy)
+        if error:
+            print(f'Error: {error}', file=sys.stderr)
+            sys.exit(1)
+        strategies = [args.strategy]
 
-    # Detectar hardware y shape del dataset
-    print(f'Detectando hardware...', file=sys.stderr)
+    print('Detectando hardware...', file=sys.stderr)
     hardware = detect_hardware()
     n_samples, n_items = detect_dataset_shape(data_dir)
     if n_samples == 0:
-        n_items = 0  # fallback si no se pudo detectar
+        n_items = 0
 
     if args.verbose:
         print(f'  Dataset: {n_samples} muestras × {n_items} items', file=sys.stderr)
@@ -885,130 +1073,59 @@ def main():
         print(f'  RAM: {hardware.ram_gb} GB', file=sys.stderr)
         gpu_label = hardware.gpu_model if hardware.gpu_model != 'none' else 'none'
         print(f'  GPU: {gpu_label}', file=sys.stderr)
-        if hardware.gpu_cuda_cores > 0:
-            print(f'  CUDA cores: {hardware.gpu_cuda_cores}', file=sys.stderr)
-        if hardware.gpu_mem_gb > 0:
-            print(f'  GPU mem: {hardware.gpu_mem_gb} GB', file=sys.stderr)
 
-    # Preparar CSV
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     write_header = not (args.append and output_path.exists())
-    mode = 'a' if args.append else 'w'
+    file_mode = 'a' if args.append else 'w'
 
-    results_written = 0
-    errors = 0
+    total_written = 0
+    total_errors = 0
 
-    with open(output_path, mode, newline='') as f:
+    with open(output_path, file_mode, newline='') as f:
         writer = csv.writer(f)
         if write_header:
             writer.writerow(CSV_HEADER.split(','))
-            if args.verbose:
-                print(f'CSV header escrito: {output_path}', file=sys.stderr)
 
-        for k_val in k_values:
-            cmd = build_command(
-                strategy=args.strategy,
-                k=k_val,
+        for strategy in strategies:
+            workers = resolve_parallel_units(strategy, hardware, args.workers)
+            written, errs = run_strategy_benchmark(
+                strategy=strategy,
+                k_values=k_values,
+                search=args.search,
                 seed=args.seed,
                 data_dir=data_dir,
-                search=args.search,
                 step=args.step,
                 workers=workers,
                 block_size=args.block_size,
                 batch_size=args.batch_size,
-            )
-
-            label = f'{args.strategy} k={k_val} search={args.search}'
-            print(f'\n[{label}]', file=sys.stderr)
-            if args.verbose:
-                print(f'  Comando: {" ".join(cmd)}', file=sys.stderr)
-
-            try:
-                start = time.time()
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    cwd=str(PROJECT_ROOT),
-                )
-                stdout_lines = []
-                assert proc.stdout is not None
-                for line in proc.stdout:
-                    print(line, end='', flush=True)
-                    stdout_lines.append(line)
-                proc.wait()
-                elapsed = time.time() - start
-            except FileNotFoundError as e:
-                print(f'  ERROR: comando no encontrado: {e}', file=sys.stderr)
-                errors += 1
-                continue
-
-            stderr_text = proc.stderr.read().strip() if proc.stderr else ''
-            stdout_text = ''.join(stdout_lines).strip()
-
-            if proc.returncode != 0:
-                print(f'  ERROR: código de retorno {proc.returncode}',
-                      file=sys.stderr)
-                if stderr_text:
-                    for line in stderr_text.splitlines()[-5:]:
-                        print(f'  stderr: {line}', file=sys.stderr)
-                errors += 1
-                continue
-
-            # Parsear resultado
-            run_result = parse_output(
-                strategy=args.strategy,
-                stdout=stdout_text,
-                k_requested=k_val,
-                seed=args.seed,
-                parallel_units=workers,
                 hardware=hardware,
-                search_mode=args.search,
-                detected_n_samples=n_samples,
-                detected_n_items=n_items,
+                n_samples=n_samples,
+                n_items=n_items,
+                writer=writer,
+                verbose=args.verbose,
             )
+            total_written += written
+            total_errors += errs
 
-            # Escribir CSV
-            row = result_to_row(run_result)
-            writer.writerow(row)
-            results_written += 1
-
-            if args.verbose:
-                print(f'  ✓ AUC={run_result.best_auc:.6f} '
-                      f'time={run_result.time_sec:.4f}s '
-                      f'k_max={run_result.k_max} '
-                      f'iter={run_result.iterations_until_best}',
-                      file=sys.stderr)
-            else:
-                print(f'  ✓ {run_result.best_auc:.6f} AUC '
-                      f'en {run_result.time_sec:.4f}s '
-                      f'(K={run_result.k_max})',
-                      file=sys.stderr)
-
-    # Resumen final
     print(f'\n{"="*50}', file=sys.stderr)
-    print(f'Pipeline completado: {results_written} resultados escritos, '
-          f'{errors} errores', file=sys.stderr)
+    print(f'Pipeline completado: {total_written} resultados escritos, '
+          f'{total_errors} errores', file=sys.stderr)
     print(f'CSV: {output_path}', file=sys.stderr)
-    print(f'Estrategia: {args.strategy}', file=sys.stderr)
+    if args.all_strategies:
+        print(f'Estrategias: {", ".join(strategies)}', file=sys.stderr)
+    else:
+        print(f'Estrategia: {strategies[0]}', file=sys.stderr)
     print(f'Búsqueda: {args.search}', file=sys.stderr)
-    print(f'Workers: {workers}', file=sys.stderr)
     print(f'K values: {k_values}', file=sys.stderr)
     print(f'Hardware: {hardware.cpu_model} / '
           f'{hardware.cpu_cores}C{hardware.cpu_logical_cores}T / '
           f'{hardware.ram_gb}GB RAM',
           file=sys.stderr)
-    gpu_label = hardware.gpu_model if hardware.gpu_model != 'none' else 'none'
-    if hardware.gpu_cuda_cores > 0 or 'integrated' in hardware.gpu_model:
-        print(f'GPU: {hardware.gpu_model} / {hardware.gpu_mem_gb}GB', file=sys.stderr)
-    else:
-        print(f'GPU: {gpu_label}', file=sys.stderr)
     print(f'{"="*50}', file=sys.stderr)
 
-    return 0 if errors == 0 else 1
+    return 0 if total_errors == 0 else 1
 
 
 if __name__ == '__main__':
