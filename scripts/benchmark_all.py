@@ -152,7 +152,12 @@ def run_python_seq(K, search, workers, data_dir, log):
 # ── Runner: C sequential (via WSL con bash) ──
 def run_c_seq(K, search, workers, data_dir, log):
     label = 'c-seq'
-    exe = str(_project_root() / 'C_OpenMP_MPI/scoring_sequential')
+    if _in_wsl():
+        exe = str(_project_root() / 'C_OpenMP_MPI/scoring_sequential')
+    else:
+        exe = str(_project_root() / 'C_OpenMP_MPI/scoring_sequential.exe')
+    if not _check_exe(exe):
+        return BenchResult(label, search, K, 0, 0, 0, 0, error=f'binario no encontrado')
     cmd = [exe, '--k', str(K), '--seed', '42', '--data-dir', data_dir]
     stdout, stderr, rc = _run_cmd(cmd)
     if rc != 0:
@@ -189,12 +194,9 @@ def run_python_mp(K, search, workers, data_dir, log):
 def run_openmp(K, search, workers, data_dir, log):
     n_threads = workers
     label = f'openmp({n_threads})'
-    if _in_wsl():
-        exe = str(_project_root() / 'C_OpenMP_MPI/scoring_openmp')
-    else:
-        exe = str(_project_root() / 'C_OpenMP_MPI/scoring_openmp.exe')
+    exe = str(_project_root() / ('C_OpenMP_MPI/scoring_openmp' if _in_wsl() else 'C_OpenMP_MPI/scoring_openmp.exe'))
     if not _check_exe(exe):
-        return BenchResult(label, search, K, 0, 0, 0, 0, error=f'binario no encontrado: {exe}')
+        return BenchResult(label, search, K, 0, 0, 0, 0, error=f'binario no encontrado')
 
     if search == 'grid':
         cmd = [exe, '--k', str(K), '--seed', '42', '--data-dir', data_dir,
@@ -219,21 +221,24 @@ def run_mpi(K, search, workers, data_dir, log):
     label = f'mpi({n_ranks})'
 
     # Verificar binario MPI
-    if _in_wsl():
-        exe = str(_project_root() / 'C_OpenMP_MPI/scoring_mpi')
-    else:
-        exe = str(_project_root() / 'C_OpenMP_MPI/scoring_mpi.exe')
+    exe = str(_project_root() / ('C_OpenMP_MPI/scoring_mpi' if _in_wsl() else 'C_OpenMP_MPI/scoring_mpi.exe'))
     if not _check_exe(exe):
-        return BenchResult(label, search, K, 0, 0, 0, 0, error=f'binario no encontrado: {exe}')
+        return BenchResult(label, search, K, 0, 0, 0, 0, error=f'binario no encontrado')
 
     # Detectar mpirun/mpiexec
     launcher = 'mpirun'
-    for mp in ['mpiexec', 'mpirun']:
-        if subprocess.run(f'where {mp}', shell=True, capture_output=True).returncode == 0:
-            launcher = mp
-            break
+    if _in_wsl():
+        for mp in ['mpirun', 'mpiexec']:
+            if subprocess.run(['which', mp], capture_output=True).returncode == 0:
+                launcher = mp; break
+        else:
+            return BenchResult(label, search, K, 0, 0, 0, 0, error='mpirun/mpiexec no encontrado (WSL)')
     else:
-        return BenchResult(label, search, K, 0, 0, 0, 0, error='mpirun/mpiexec no encontrado')
+        for mp in ['mpiexec', 'mpirun']:
+            if subprocess.run(f'where {mp}', shell=True, capture_output=True).returncode == 0:
+                launcher = mp; break
+        else:
+            return BenchResult(label, search, K, 0, 0, 0, 0, error='mpirun/mpiexec no encontrado (Windows)')
 
     if search == 'grid':
         cmd = [launcher, '-np', str(n_ranks), exe,
@@ -247,14 +252,19 @@ def run_mpi(K, search, workers, data_dir, log):
     if rc != 0:
         return BenchResult(label, search, K, 0, 0, 0, 0, error=stderr)
 
-    # Parse CSV: c_mpi,strategy,n_samples,n_items,k,workers,time_sec,best_auc,consistency,w1,w2,w3,seed
+    # Parse CSV output (buscar línea que empieza con "c_mpi,")
+    csv_line = ''
+    for line in stdout.split('\n'):
+        if line.strip().startswith('c_mpi,'):
+            csv_line = line.strip()
+            break
+    if not csv_line:
+        return BenchResult(label, search, K, 0, 0, 0, 0, error=f'no CSV line found')
+
     try:
-        parts = stdout.strip().split(',')
+        parts = csv_line.split(',')
         if len(parts) < 12:
-            return BenchResult(label, search, K, 0, 0, 0, 0, error=f'parse error: {stdout[:200]}')
-        # parts[0]=c_mpi, parts[1]=strategy, parts[2]=n_samples, parts[3]=n_items,
-        # parts[4]=k, parts[5]=workers, parts[6]=time_sec, parts[7]=auc, parts[8]=cons,
-        # parts[9]=w1, parts[10]=w2, parts[11]=w3, parts[12]=seed
+            return BenchResult(label, search, K, 0, 0, 0, 0, error=f'parse error: {csv_line[:200]}')
         k_val = int(parts[4])
         t = float(parts[6])
         auc_val = float(parts[7])
@@ -262,16 +272,26 @@ def run_mpi(K, search, workers, data_dir, log):
         w1, w2, w3 = float(parts[9]), float(parts[10]), float(parts[11])
         return BenchResult(label, search, K, k_val, t, auc_val, cons_val, w1, w2, w3, workers=n_ranks)
     except (ValueError, IndexError) as e:
-        return BenchResult(label, search, K, 0, 0, 0, 0, error=str(e))
+        return BenchResult(label, search, K, 0, 0, 0, 0, error=f'{e}: {csv_line[:100]}')
 
 
 # ── Runner: CUDA C ──
 def run_cuda(K, search, workers, data_dir, log):
     label = 'cuda_c'
-    exe = str(_project_root() / 'CUDA/scoring_cuda.exe')
     npy_dir = _cuda_data_path(data_dir)
-    if not os.path.exists(exe):
-        return BenchResult(label, search, K, 0, 0, 0, 0, error=f'binario no encontrado: {exe}')
+    # Buscar binario CUDA (.exe en Windows, sin extensión en WSL)
+    exe_candidates = [
+        str(_project_root() / 'CUDA/scoring_cuda.exe'),
+        str(_project_root() / 'CUDA/scoring_cuda'),
+    ]
+    exe = None
+    for e in exe_candidates:
+        if _check_exe(e):
+            exe = e
+            break
+    if exe is None:
+        return BenchResult(label, search, K, 0, 0, 0, 0,
+                           error=f'binario no encontrado: intenté {exe_candidates[0]}')
 
     if search == 'grid':
         cmd = [exe, '--k', str(K), '--seed', '42', '--search', 'grid',

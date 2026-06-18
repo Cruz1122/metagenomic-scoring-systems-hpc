@@ -23,76 +23,6 @@
 /*  Internas: parseo de CSV                                           */
 /*  (compartido por load_csv_matrix, load_csv_profiles, load_csv_labels) */
 /* ================================================================== */
-
-static void strip_eol(char *line) {
-    size_t n = strlen(line);
-    while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r'))
-        line[--n] = '\0';
-}
-
-static int line_nonempty(const char *line) {
-    for (const char *p = line; *p; p++)
-        if (*p != ' ' && *p != '\t') return 1;
-    return 0;
-}
-
-/**
- * @brief Lee una línea CSV con buffer dinámico (sin límite fijo de 64 KiB).
- * @return 0 en éxito, -1 en EOF o error.
- */
-static int read_csv_line(FILE *fh, char **line, size_t *cap) {
-    ssize_t n = getline(line, cap, fh);
-    if (n < 0) return -1;
-    strip_eol(*line);
-    return 0;
-}
-
-/**
- * @brief Cuenta campos separados por comas en una línea.
- */
-static int csv_fields(const char *line) {
-    int n = 1;
-    for (const char *p = line; *p; p++)
-        if (*p == ',') n++;
-    return n;
-}
-
-/**
- * @brief Avanza `n` campos desde `p` y devuelve el inicio del siguiente.
- */
-static const char *csv_skip_fields(const char *p, int n) {
-    for (int i = 0; i < n; i++) {
-        while (*p && *p != ',') p++;
-        if (*p == ',') p++;
-        else if (i < n - 1) return NULL;
-    }
-    return p;
-}
-
-/**
- * @brief Parsea `data_cols` doubles tras omitir el primer campo (sample_id).
- * Un solo recorrido O(data_cols) por fila.
- */
-static int parse_matrix_row(char *line, int data_cols, double *row) {
-    char *p = line;
-    while (*p && *p != ',') p++;
-    if (*p != ',') return -1;
-    p++;
-
-    for (int c = 0; c < data_cols; c++) {
-        char *end = NULL;
-        row[c] = strtod(p, &end);
-        if (end == p) return -1;
-        p = end;
-        if (c < data_cols - 1) {
-            if (*p != ',') return -1;
-            p++;
-        }
-    }
-    return 0;
-}
-
-/* ================================================================== */
 /*  Carga de CSVs individuales                                        */
 /* ================================================================== */
 
@@ -111,45 +41,64 @@ static double* load_csv_matrix(const char *path, int *rows, int *cols) {
     FILE *fh = fopen(path, "rb");
     if (!fh) { perror(path); return NULL; }
 
-    char *line = NULL;
-    size_t cap = 0;
-
-    if (read_csv_line(fh, &line, &cap) != 0) {
-        fprintf(stderr, "ERROR: CSV vacío: %s\n", path);
-        free(line); fclose(fh); return NULL;
-    }
-
-    int total_cols = csv_fields(line);
-    int data_cols  = total_cols - 1;
-    if (data_cols < 1) {
-        free(line); fclose(fh); return NULL;
-    }
-
-    int nrows = 0;
-    while (read_csv_line(fh, &line, &cap) == 0) {
-        if (line_nonempty(line)) nrows++;
-    }
-    if (nrows == 0) {
-        free(line); fclose(fh); return NULL;
-    }
-
-    double *out = malloc((size_t)nrows * (size_t)data_cols * sizeof(double));
-    if (!out) { free(line); fclose(fh); return NULL; }
-
+    // Read entire file into memory
+    fseek(fh, 0, SEEK_END);
+    long fsize = ftell(fh);
     rewind(fh);
-    if (read_csv_line(fh, &line, &cap) != 0) {
-        free(out); free(line); fclose(fh); return NULL;
+    char *raw = (char*)malloc((size_t)fsize + 1);
+    if (!raw) { fclose(fh); return NULL; }
+    size_t nread = fread(raw, 1, (size_t)fsize, fh);
+    raw[nread] = '\0';
+    fclose(fh);
+
+    // First line is header: count columns
+    char *p = raw;
+    while (*p && *p != '\n') p++;
+    if (*p == '\n') p++;
+    int data_cols = 1;
+    for (char *q = raw; q < p; q++) if (*q == ',') data_cols++;
+    data_cols--; // subtract sample_id column
+    if (data_cols < 1) { free(raw); return NULL; }
+
+    // Count data rows and store line starts
+    long max_rows = 20000;
+    char **line_starts = (char**)malloc((size_t)max_rows * sizeof(char*));
+    if (!line_starts) { free(raw); return NULL; }
+    int nrows = 0;
+    line_starts[nrows++] = p;
+    while (*p) {
+        if (*p == '\n') {
+            p++;
+            if (*p && *p != '\n') {
+                if (nrows >= max_rows) {
+                    max_rows *= 2;
+                    line_starts = (char**)realloc(line_starts, (size_t)max_rows * sizeof(char*));
+                }
+                line_starts[nrows++] = p;
+            }
+        } else p++;
     }
+
+    // Parse all rows in one pass
+    double *out = (double*)malloc((size_t)nrows * (size_t)data_cols * sizeof(double));
+    if (!out) { free(raw); free(line_starts); return NULL; }
 
     for (int r = 0; r < nrows; r++) {
-        if (read_csv_line(fh, &line, &cap) != 0 ||
-            parse_matrix_row(line, data_cols, out + (size_t)r * data_cols) != 0) {
-            free(out); free(line); fclose(fh); return NULL;
+        char *row = line_starts[r];
+        // Skip sample_id
+        while (*row && *row != ',') row++;
+        if (*row == ',') row++;
+        for (int c = 0; c < data_cols; c++) {
+            char *end;
+            out[(size_t)r * data_cols + c] = strtod(row, &end);
+            if (end == row) { out[(size_t)r * data_cols + c] = 0.0; }
+            row = end;
+            if (*row == ',') row++;
         }
     }
 
-    free(line);
-    fclose(fh);
+    free(raw);
+    free(line_starts);
     *rows = nrows;
     *cols = data_cols;
     return out;
@@ -168,40 +117,41 @@ static int* load_csv_labels(const char *path, int *n) {
     FILE *fh = fopen(path, "rb");
     if (!fh) { perror(path); return NULL; }
 
-    char *line = NULL;
-    size_t cap = 0;
-
-    if (read_csv_line(fh, &line, &cap) != 0) {
-        free(line); fclose(fh); return NULL;
-    }
-
-    int nrows = 0;
-    while (read_csv_line(fh, &line, &cap) == 0) {
-        if (line_nonempty(line)) nrows++;
-    }
-    if (nrows == 0) {
-        free(line); fclose(fh); return NULL;
-    }
-
-    int *out = malloc((size_t)nrows * sizeof(int));
-    if (!out) { free(line); fclose(fh); return NULL; }
-
+    fseek(fh, 0, SEEK_END);
+    long fsize = ftell(fh);
     rewind(fh);
-    if (read_csv_line(fh, &line, &cap) != 0) {
-        free(out); free(line); fclose(fh); return NULL;
+    char *raw = (char*)malloc((size_t)fsize + 1);
+    if (!raw) { fclose(fh); return NULL; }
+    size_t nread = fread(raw, 1, (size_t)fsize, fh);
+    raw[nread] = '\0';
+    fclose(fh);
+
+    // Skip header
+    char *p = raw;
+    while (*p && *p != '\n') p++;
+    if (*p == '\n') p++;
+
+    long max_rows = 20000;
+    char **line_starts = (char**)malloc((size_t)max_rows * sizeof(char*));
+    int nrows = 0;
+    line_starts[nrows++] = p;
+    while (*p) {
+        if (*p == '\n') { p++; if (*p && *p != '\n') { if (nrows >= max_rows) { max_rows *= 2; line_starts = (char**)realloc(line_starts, (size_t)max_rows * sizeof(char*)); } line_starts[nrows++] = p; } }
+        else p++;
     }
+
+    int *out = (int*)malloc((size_t)nrows * sizeof(int));
+    if (!out) { free(raw); free(line_starts); return NULL; }
 
     for (int r = 0; r < nrows; r++) {
-        const char *p;
-        if (read_csv_line(fh, &line, &cap) != 0 ||
-            (p = csv_skip_fields(line, 1)) == NULL) {
-            free(out); free(line); fclose(fh); return NULL;
-        }
-        out[r] = (int)strtol(p, NULL, 10);
+        char *row = line_starts[r];
+        // Skip sample_id (first field)
+        while (*row && *row != ',') row++;
+        if (*row == ',') row++;
+        out[r] = (int)strtol(row, NULL, 10);
     }
 
-    free(line);
-    fclose(fh);
+    free(raw); free(line_starts);
     *n = nrows;
     return out;
 }
@@ -220,46 +170,49 @@ static double* load_csv_profiles(const char *path, int *rows, int *cols) {
     FILE *fh = fopen(path, "rb");
     if (!fh) { perror(path); return NULL; }
 
-    char *line = NULL;
-    size_t cap = 0;
-
-    if (read_csv_line(fh, &line, &cap) != 0) {
-        free(line); fclose(fh); return NULL;
-    }
-
-    int nrows = 0;
-    while (read_csv_line(fh, &line, &cap) == 0) {
-        if (line_nonempty(line)) nrows++;
-    }
-    if (nrows == 0) {
-        free(line); fclose(fh); return NULL;
-    }
-
-    double *out = malloc((size_t)nrows * 3 * sizeof(double));
-    if (!out) { free(line); fclose(fh); return NULL; }
-
+    fseek(fh, 0, SEEK_END);
+    long fsize = ftell(fh);
     rewind(fh);
-    if (read_csv_line(fh, &line, &cap) != 0) {
-        free(out); free(line); fclose(fh); return NULL;
+    char *raw = (char*)malloc((size_t)fsize + 1);
+    if (!raw) { fclose(fh); return NULL; }
+    size_t nread = fread(raw, 1, (size_t)fsize, fh);
+    raw[nread] = '\0';
+    fclose(fh);
+
+    // Skip header
+    char *p = raw;
+    while (*p && *p != '\n') p++;
+    if (*p == '\n') p++;
+
+    long max_rows = 20000;
+    char **line_starts = (char**)malloc((size_t)max_rows * sizeof(char*));
+    int nrows = 0;
+    line_starts[nrows++] = p;
+    while (*p) {
+        if (*p == '\n') { p++; if (*p && *p != '\n') { if (nrows >= max_rows) { max_rows *= 2; line_starts = (char**)realloc(line_starts, (size_t)max_rows * sizeof(char*)); } line_starts[nrows++] = p; } }
+        else p++;
     }
+
+    double *out = (double*)malloc((size_t)nrows * 3 * sizeof(double));
+    if (!out) { free(raw); free(line_starts); return NULL; }
 
     for (int r = 0; r < nrows; r++) {
-        const char *pT, *pS, *pF;
-        if (read_csv_line(fh, &line, &cap) != 0 ||
-            (pT = csv_skip_fields(line, 2)) == NULL ||
-            (pS = csv_skip_fields(line, 5)) == NULL ||
-            (pF = csv_skip_fields(line, 6)) == NULL) {
-            free(out); free(line); fclose(fh); return NULL;
+        char *row = line_starts[r];
+        // Skip 2 fields (item_id, taxon_name) → field 2 = T
+        int field = 0; char *tok = row;
+        while (field < 7 && *tok) {
+            char *end = tok;
+            while (*end && *end != ',') end++;
+            if (field == 2) out[r * 3 + 0] = strtod(tok, NULL);
+            if (field == 5) out[r * 3 + 1] = strtod(tok, NULL);
+            if (field == 6) out[r * 3 + 2] = strtod(tok, NULL);
+            tok = (*end == ',') ? end + 1 : end;
+            field++;
         }
-        out[r * 3 + 0] = strtod(pT, NULL);
-        out[r * 3 + 1] = strtod(pS, NULL);
-        out[r * 3 + 2] = strtod(pF, NULL);
     }
 
-    free(line);
-    fclose(fh);
-    *rows = nrows;
-    *cols = 3;
+    free(raw); free(line_starts);
+    *rows = nrows; *cols = 3;
     return out;
 }
 

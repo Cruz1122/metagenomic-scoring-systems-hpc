@@ -24,3 +24,9 @@ data/processed/
 # Generated results (regenerate with: make benchmark)
 results/benchmark.csv
 results/benchmark_raw.csv
+
+/results/benchmark_plots/
+/data/csv/
+/data/plots/
+/data/npy/
+
