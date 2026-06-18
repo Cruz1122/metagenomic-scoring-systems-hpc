@@ -2,6 +2,7 @@ SHELL := /bin/bash
 
 # ── Parámetros (override: make c-openmp K=500 THREADS=2 SEARCH=random) ──
 K            ?= 10000
+K_LIST       ?= 1000,10000
 SEED         ?= 42
 SEARCH       ?= random
 STEP         ?= 0.02
@@ -38,7 +39,7 @@ export OPENMPFLAGS ?= -fopenmp
 .PHONY: help data data-100 data-2000 \
         python-sequential python-multicore python-pycuda \
         c-sequential c-openmp c-mpi c-cuda \
-        c cuda benchmark plots test-args clean
+        c cuda benchmark benchmark-all plots test-args clean
 
 help:
 	@echo "Build:"
@@ -58,7 +59,7 @@ help:
 	@echo "  make c-openmp K=500 THREADS=2 SEARCH=random"
 	@echo "  make c-mpi WORKERS=3   (MPI_RANKS hereda WORKERS si no se pasa)"
 	@echo ""
-	@echo "  make data | make test-args | make benchmark | make plots | make clean"
+	@echo "  make data | make test-args | make benchmark | make benchmark-all | make plots | make clean"
 
 data:
 	$(PYTHON) data/scripts/generate_dataset.py \
@@ -160,6 +161,9 @@ benchmark:
 	else echo "[WARN] PyCUDA omitido." >&2; fi; \
 	$(PYTHON) scripts/postprocess_benchmark.py --input "$$RAW" --output "$$OUT"; \
 	echo "Benchmark consolidado: $$OUT"
+
+benchmark-all:
+	$(PYTHON) scripts/benchmark_all.py --k-list $(K_LIST) --workers $(WORKERS) --data-dir $(NORM_DATA_DIR)
 
 plots:
 	$(PYTHON) scripts/plot_benchmark.py --input results/benchmark.csv --out-dir results/plots
