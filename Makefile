@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 
 # ── Parámetros (override: make c-openmp K=500 THREADS=2 SEARCH=random) ──
-K            ?= 10000
+K            ?= 5000
 SEED         ?= 42
 SEARCH       ?= random
 STEP         ?= 0.02
@@ -72,7 +72,7 @@ help:
 	@echo "  make benchmark K=\"5000 10000 20000\" SEARCH=random"
 	@echo "  make c-mpi WORKERS=3   (MPI_RANKS hereda WORKERS si no se pasa)"
 	@echo ""
-	@echo "  make data | make test-args | make benchmark | make benchmark-all | make plots | make clean"
+	@echo "  make data | make test-args | make benchmark | make plots | make clean"
 
 data:
 	$(PYTHON) data/scripts/generate_dataset.py \
@@ -136,8 +136,8 @@ c-mpi:
 
 c-sequential-benchmark:
 	@test -x C_OpenMP_MPI/scoring_sequential || { echo "ERROR: binario no encontrado — ejecuta 'make c'"; exit 1; }
-	@echo ">> c-sequential-benchmark: K=$(K) seed=$(SEED) data=$(NORM_DATA_DIR)"
-	./C_OpenMP_MPI/scoring_sequential --k $(K) --seed $(SEED) --data-dir $(NORM_DATA_DIR) --benchmark
+	@echo ">> c-sequential-benchmark: K=$(K) search=$(SEARCH) data=$(NORM_DATA_DIR)"
+	./C_OpenMP_MPI/scoring_sequential $(RUN_ARGS) --benchmark
 
 c-openmp-benchmark:
 	@test -x C_OpenMP_MPI/scoring_openmp || { echo "ERROR: binario no encontrado — ejecuta 'make c'"; exit 1; }
@@ -176,9 +176,6 @@ benchmark:
 	  --k $(K) --seed $(SEED) --data-dir $(NORM_DATA_DIR) --step $(STEP) \
 	  --output $(BENCHMARK_OUT); \
 	echo "Benchmark consolidado: $(BENCHMARK_OUT)"
-
-benchmark-all:
-	$(PYTHON) scripts/benchmark_all.py --k-list $(K_LIST) --workers $(WORKERS) --data-dir $(NORM_DATA_DIR)
 
 plots:
 	@echo "ERROR: scripts/plot_benchmark.py no existe; genera gráficas manualmente desde $(BENCHMARK_OUT)" >&2; \

@@ -35,10 +35,25 @@ LOG_INTERVAL = 32
 
 # ── CUDA kernel source ────────────────────────────────────────────────
 KERNEL_CODE = """
-#define MAX_SAMPLES 1024
+#define MAX_SAMPLES 4096
+#define BLOCK_SIZE 256
 
-// ── AUC por conteo de pares positivo-negativo ──
-__device__ float auc_device(const float* scores, const int* labels, int n) {
+struct BestVal {
+    float auc;
+    float consistency;
+    int index;
+};
+
+__device__ bool is_better_dev(const BestVal& a, const BestVal& b) {
+    if (a.auc > b.auc) return true;
+    if (a.auc < b.auc) return false;
+    if (a.consistency > b.consistency) return true;
+    if (a.consistency < b.consistency) return false;
+    return a.index < b.index;
+}
+
+// ── AUC Mann-Whitney (réplica de common.c / sklearn); scores en double ──
+__device__ float auc_device(const double* scores, const int* labels, int n) {
     int n_pos = 0, n_neg = 0;
     for (int i = 0; i < n; i++) {
         if (labels[i] == 1) n_pos++;
@@ -680,6 +695,12 @@ def _resolution_for_K(K):
     return max(int(math.sqrt(2.0 * K)), 1)
 
 
+def _grid_candidate_count(K_hint, grid_resolution=0):
+    """Candidatos reales del grid (puede superar K_hint)."""
+    resolution = grid_resolution if grid_resolution > 0 else _resolution_for_K(K_hint)
+    return _generate_grid(resolution)[1]
+
+
 def _generate_random_weights(K, seed):
     rng = np.random.default_rng(seed)
     return rng.dirichlet(np.ones(3), size=K).astype(np.float32)
@@ -806,11 +827,15 @@ def timed_search(name, sm_count, A, y, profiles, K, seed,
                  log=None, search_mode='random', block_size=DEFAULT_BLOCK_SIZE,
                  mode='full', grid_resolution=0, step=0.02, fast=False):
     """Ejecuta búsqueda con medición de tiempo. El AUC se calcula en GPU."""
-    ctx = GPUContext.create(A, y, profiles, k_max=K, mode=mode, block_size=block_size)
+    k_max = K
+    if search_mode == 'grid':
+        k_max = max(K, _grid_candidate_count(K, grid_resolution))
+
+    ctx = GPUContext.create(A, y, profiles, k_max=k_max, mode=mode, block_size=block_size)
 
     tracker = None
     if not fast:
-        tracker = _CudaTracker(log, block_size, K)
+        tracker = _CudaTracker(log, block_size, k_max)
 
     if log is not None:
         _log_search_mode(search_mode, step, fast)
