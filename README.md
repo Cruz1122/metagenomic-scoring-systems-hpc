@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="./icon.svg" alt="Scoring Metagenómico HPC" width="160" />
+  <img src="./icon.svg" alt="Scoring Metagenomico HPC" width="160" />
 </p>
 
-<p align="center" style="font-size:2rem;"><strong>Scoring Metagenómico HPC</strong></p>
-<p align="center" style="font-size:1.25rem; margin-top:-1em;"><em>Optimización Paralela de Scoring Metagenómico para Clasificación Binaria</em></p>
+<p align="center" style="font-size:2rem;"><strong>Scoring Metagenomico HPC</strong></p>
+<p align="center" style="font-size:1.25rem; margin-top:-1em;"><em>Optimizacion Paralela de Scoring Metagenomico para Clasificacion Binaria</em></p>
 
 <p align="center">
   <strong>Lenguajes y plataformas</strong>
@@ -19,254 +19,543 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/NumPy-≥1.24-013243?logo=numpy&logoColor=white" alt="NumPy" />
-  <img src="https://img.shields.io/badge/scikit--learn-≥1.3-F7931E?logo=scikit-learn&logoColor=white" alt="scikit-learn" />
-  <img src="https://img.shields.io/badge/Pandas-≥2.0-150458?logo=pandas&logoColor=white" alt="Pandas" />
-  <img src="https://img.shields.io/badge/Matplotlib-≥3.7-11557C?logo=python&logoColor=white" alt="Matplotlib" />
+  <img src="https://img.shields.io/badge/NumPy-1.24+-013243?logo=numpy&logoColor=white" alt="NumPy" />
+  <img src="https://img.shields.io/badge/scikit--learn-1.3+-F7931E?logo=scikit-learn&logoColor=white" alt="scikit-learn" />
+  <img src="https://img.shields.io/badge/Pandas-2.0+-150458?logo=pandas&logoColor=white" alt="Pandas" />
 </p>
 
 ---
 
-## Decisión de arquitectura
+# Contenido
 
-El sistema busca un vector de pesos `W = (W1, W2, W3)` en el simplex `W1 + W2 + W3 = 1`, `Wi ≥ 0` que maximice el **AUC** de un scoring binario sobre 10 muestras metagenómicas (5 sanas, 5 enfermas). La búsqueda es por **Random Search** sobre `K` candidatos independientes, lo que permite paralelización trivial.
-
-La arquitectura tiene **tres niveles de abstracción**:
-
-```
-Nivel 1 — Python          → baseline, validación, portabilidad
-Nivel 2 — C/OpenMP + MPI  → paralelismo CPU: memoria compartida y distribuida
-Nivel 3 — CUDA + PyCUDA   → aceleración GPU masivamente paralela
-```
-
----
-
-## Estructura del repositorio
-
-```text
-metagenomic-scoring-systems-hpc/
-├── data/
-│   ├── csv/                    → symlink a processed/.../csv/
-│   ├── npy/                    → symlink a processed/.../npy/
-│   ├── dataset_manifest.json   → symlink a processed/.../dataset_manifest.json
-│   ├── processed/              → datasets generados
-│   │   ├── synthetic_CRC100x500_balanced/   → 100 muestras (desarrollo)
-│   │   └── synthetic_CRC2000x500_balanced/  → 2000 muestras (default)
-│   └── scripts/
-│       └── generate_dataset.py → genera dataset sintético (implementado)
-├── python/
-│   ├── __init__.py             → docstring del paquete
-│   ├── common.py               → SearchResult, load_data, evaluate, AUC, consistency
-│   ├── sequential.py           → baseline: random/grid/hybrid search (implementado)
-│   ├── multicore.py            → multiprocessing Pool.map (implementado)
-│   └── logger.py               → logger colorido ANSI
-├── C_OpenMP_MPI/
-│   ├── scoring_sequential.c    → baseline C secuencial
-│   ├── scoring_openmp.c        → OpenMP: random + grid + hybrid (3 estrategias)
-│   ├── scoring_mpi.c           → [SCAFFOLD] MPI: reusa shared/
-│   ├── shared/                 → código compartido C
-│   │   ├── common.h/c          → load_data, evaluate, AUC, consistency
-│   │   ├── rng.h/c             → PCG64 + Dirichlet
-│   │   ├── ziggurat.h/c        → generador Ziggurat
-│   │   └── logger.h/c          → logger ANSI
-│   └── Makefile                → compilación gcc / mpicc
-├── CUDA/
-│   └── scoring_pycuda.py       → PyCUDA (kernel embebido + logger grilla/bloque/thread)
-├── scripts/
-│   ├── postprocess_benchmark.py → [SCAFFOLD] calcula speedup/efficiency
-│   └── plot_benchmark.py        → [SCAFFOLD] gráficas de benchmark
-├── results/
-│   └── plots/                  → .gitkeep (gráficas se generan con make plots)
-├── docs/                       → documentación técnica (13 .md + prompts/)
-│   └── prompts/                → prompts de dataset analysis
-├── DATASET.md                  → descripción de datasets disponibles
-├── run_all.sh                  → pipeline de benchmark automatizado
-├── Makefile                    → atajos data, python-seq/grid/hybrid, python-mp/grid/hybrid, seq-run, openmp-run, mpi-run, cuda, benchmark
-├── PROJECT.md                  → especificación contractual del proyecto
-├── icon.svg                    → logo del proyecto
-├── requirements.txt            → dependencias Python
-└── .gitignore                  → ignora __pycache__, compilados, datos generados
-```
+1. [Planteamiento del problema](#1-planteamiento-del-problema)
+2. [Dataset](#2-dataset)
+3. [Modelo matematico](#3-modelo-matematico)
+4. [Arquitectura del sistema](#4-arquitectura-del-sistema)
+5. [Estrategias de busqueda](#5-estrategias-de-busqueda)
+6. [Benchmark](#6-benchmark)
+7. [Formato de salida estandar](#7-formato-de-salida-estandar)
+8. [Estructura del repositorio](#8-estructura-del-repositorio)
+9. [Requisitos y ejecucion](#9-requisitos-y-ejecucion)
+10. [Documentacion](#10-documentacion)
 
 ---
 
-## Requisitos
+## 1. Planteamiento del problema
 
-| Herramienta | Versión | Propósito |
+Dado un conjunto de $N$ perfiles taxonomicos, ecologicos y funcionales para cada item de interes biologico, se busca un vector de pesos $W = (W_1, W_2, W_3)$ que maximice la capacidad de discriminar entre dos poblaciones: sana ($y=0$) y enferma ($y=1$). La discriminacion se mide mediante el area bajo la curva ROC (AUC).
+
+Cada muestra j se describe mediante una matriz de contribucion $A$ de dimensiones $n_{\text{muestras}} \times N$. Cada item $i$ tiene tres perfiles: $T_i$ (taxonomico), $S_i$ (ecologico-poblacional) y $F_i$ (funcional). El score de una muestra se obtiene combinando estos perfiles con los pesos:
+
+$$
+P_i = W_1 T_i + W_2 S_i + W_3 F_i
+$$
+
+$$
+\text{Score}_j = \sum_i A_{ji} P_i
+$$
+
+El objetivo es maximizar $\mathrm{AUC}(y, \mathrm{Score}(W))$ variando $W$ dentro del simplex tridimensional.
+
+El problema es computacionalmente relevante porque por cada candidato $W$ se debe evaluar la expresion $A \cdot (\mathrm{profiles} \cdot W)$, cuyo costo depende de $n_{\text{muestras}} \cdot N$. Con datasets realistas (2000 muestras, 10000 items), evaluar miles o millones de candidatos requiere estrategias de paralelizacion eficientes.
+
+---
+
+## 2. Dataset
+
+### 2.1 Origen y referencia biologica
+
+El dataset sintetico se diseno tomando como referencia el problema de clasificacion de cancer colorrectal (CRC) versus healthy, reportado en el preprint:
+
+> Haldar, Stein-Thoeringer, Borisov. *Interpreting Microbiome Relative Abundance Data Using Symbolic Regression*. arXiv:2410.16109, 2024.
+
+Ese trabajo utiliza 71 estudios de `curatedMetagenomicData`, con 11,137 muestras healthy/CRC y 749 features de especies microbianas. Por limitaciones de acceso a los datos reales (HTTP 403 al descargar `relative_abundance`), este proyecto genera un dataset sintetico compatible con el problema real.
+
+El archivo [`fuente_real_dataset_sintetico_crc.md`](fuente_real_dataset_sintetico_crc.md) documenta en detalle la fuente real, las decisiones metodologicas y las diferencias con el dataset sintetico.
+
+### 2.2 Dimensiones y estructura
+
+El dataset principal se denomina `synthetic_CRC2000x10000_balanced`:
+
+| Componente | Dimension | Contenido |
 |---|---|---|
-| Python | ≥ 3.10 | Baseline secuencial, multicore, PyCUDA |
-| GCC | ≥ 10 | Compilación OpenMP |
-| MPICH / OpenMPI | ≥ 3.0 | Compilación y ejecución MPI |
-| PyCUDA + CUDA toolkit | ≥ 12 | GPU scoring (`make python-pycuda`) |
-| make | ≥ 4 | Automatización |
+| `matrix_A.npy` | 2000 x 10000 | Contribucion de cada item por muestra (abundancia relativa normalizada) |
+| `labels.npy` | 2000 | Clase: 0 (healthy), 1 (CRC) |
+| `profiles_TSF.npy` | 10000 x 3 | Perfiles T (taxonomico), S (ecologico), F (funcional) por item |
 
-Dependencias Python:
+Composicion de etiquetas:
 
-```bash
-pip install -r requirements.txt
-# Contenido: numpy>=1.24, pandas>=2.0, matplotlib>=3.7, scikit-learn>=1.3
-```
+- 1000 muestras healthy (y=0)
+- 1000 muestras CRC (y=1)
 
----
+El dataset esta balanceado por construccion para evitar sesgos en la metrica AUC.
 
-## Instalación y ejecución
+### 2.3 Separacion REF/EVAL
 
-### 1. Generar datos
+El generador separa las muestras en dos cohortes independientes:
 
-```bash
-# 2000 muestras (default)
-make data
+- **REF** (1000 muestras): se usa exclusivamente para estimar los perfiles T y S.
+- **EVAL** (2000 muestras): se exporta como `matrix_A.npy` y `labels.npy`, y es sobre el que se mide el AUC.
 
-# 100 muestras (desarrollo rápido)
-make data-100
+Esta separacion evita **fuga de etiqueta (label leakage)**: si T se calculara sobre las mismas muestras que se evaluan, el perfil taxonomico podria codificar indirectamente la clase y producir un AUC artificialmente alto.
 
-# Directo
-python data/scripts/generate_dataset.py
+### 2.4 Generacion sintetica
 
-# 100 muestras (desarrollo rápido)
-python data/scripts/generate_dataset.py --n-eval 100 --n-ref 200 --allow-small
-```
+El script `data/scripts/generate_dataset.py` produce las matrices mediante:
 
-### 2. Python (baseline)
+1. Abundancias base con distribucion gamma.
+2. Efecto de clase sobre grupos de items enriquecidos en CRC o healthy.
+3. Efecto de metadata sintetica (edad, BMI).
+4. Ruido lognormal por muestra.
+5. Zero-inflation para simular escasez (sparsity).
+6. Normalizacion composicional (cada fila suma 1).
 
-```bash
-make python-seq K=10000         # secuencial
-make python-mp K=10000 WORKERS=4  # multicore
-```
+Los perfiles T se derivan del log fold-change entre CRC y healthy en REF. Los perfiles S se derivan de la correlacion con metadata de riesgo. Los perfiles F son marcadores funcionales sinteticos (resistencia, virulencia, inflamacion, metabolicos, beneficos).
 
-### 3. C secuencial
+### 2.5 Reproducibilidad
 
-```bash
-make seq-run K=10000            # compila y ejecuta baseline C
-```
-
-### 4. C/OpenMP
-
-```bash
-make c                          # compila todos los binarios C
-OMP_NUM_THREADS=4 ./C_OpenMP_MPI/scoring_openmp --k 100000 --seed 42 --data-dir data
-```
-
-### 5. C/MPI
-
-```bash
-make -C C_OpenMP_MPI scoring_mpi
-mpirun -np 4 ./C_OpenMP_MPI/scoring_mpi --k 100000 --seed 42 --data-dir data
-```
-> ⚠️ **Scaffold:** MPI imprime salida placeholder. Falta implementar la lógica de búsqueda distribuida.
-
-### 6. PyCUDA
-
-```bash
-make python-pycuda K=100000 SEED=42 SEARCH=random
-# Requiere CUDA toolkit (p. ej. /opt/cuda) y PyCUDA instalado
-```
-
-### 7. Benchmark integral
-
-```bash
-./run_all.sh                              # 2000 muestras
-DATASET_SIZE=100 ./run_all.sh             # 100 muestras (rápido)
-# Sobrescribe variables de entorno para configurar:
-DATASET_SIZE=2000 N_ITEMS=500 K=100000 SEED=42 THREADS_LIST="1 2 4 8" WORKERS_LIST="2 4" MPI_RANKS_LIST="2 4" ./run_all.sh
-```
-
-Resultado: se genera `results/benchmark_raw.csv` con columnas `implementation,parallel_units,n_items,k,time_sec,auc,consistency,w1,w2,w3,seed,search_mode,iterations_until_best`. Post-procesado genera `results/benchmark.csv` añadiendo `speedup, efficiency`.
+Todo el proceso usa `seed=42` como semilla base. El generador acepta parametros para controlar senal, ruido, zero-inflation y dimensiones, documentados en la ayuda del script.
 
 ---
 
-## Formato de salida estándar
+## 3. Modelo matematico
 
-Toda implementación imprime una línea CSV con:
+### 3.1 Score por item
+
+Cada item $i$ aporta un score escalar que combina sus tres perfiles mediante el vector de pesos $W$:
+
+$$
+P_i = W_1 T_i + W_2 S_i + W_3 F_i
+$$
+
+Donde $T_i, S_i, F_i \in [0, 1]$ representan respectivamente la senal taxonomica, ecologica y funcional del item $i$.
+
+### 3.2 Score por muestra
+
+El score de la muestra $j$ se obtiene como combinacion lineal de los scores por item, ponderada por la matriz de contribucion $A$:
+
+$$
+\text{Score}_j = \sum_{i=1}^{N} A_{ji} P_i
+$$
+
+En forma matricial:
+
+$$
+\mathbf{Score} = A \mathbf{P}
+$$
+
+donde $A \in \mathbb{R}^{n_{\text{muestras}} \times N}$ y $\mathbf{P} \in \mathbb{R}^{N}$.
+
+### 3.3 Funcion objetivo
+
+$$
+\max_{W} \; \mathrm{AUC}\bigl(y, \mathrm{Score}(W)\bigr)
+$$
+
+El AUC mide la probabilidad de que una muestra enferma reciba un score mayor que una muestra sana. Su rango teorico es $[0, 1]$, donde $0.5$ indica azar y $1.0$ separacion perfecta.
+
+### 3.4 Espacio de busqueda
+
+Los pesos $W$ deben pertenecer al simplex de dimension 2 (simplex tridimensional):
+
+$$
+W_1 + W_2 + W_3 = 1, \qquad W_i \geq 0 \quad \text{para } i = 1, 2, 3
+$$
+
+Este espacio es continuo y de dimension 2 (tres coordenadas con una restriccion de suma). La distribucion de Dirichlet con parametros $\alpha = (1, 1, 1)$ es uniforme sobre este simplex, lo que la convierte en la opcion natural para muestrear candidatos en Random Search. Cada muestra de $\mathrm{Dirichlet}(1, 1, 1)$ produce un vector $W$ que cumple automaticamente ambas restricciones.
+
+### 3.5 Validacion del scoring
+
+Para un umbral de decision $\theta$, la consistencia se define como el balanced accuracy maximo sobre todos los umbrales posibles:
+
+$$
+\text{Consistencia} = \max_{\theta} \; 0.5 \cdot \bigl(\mathrm{TPR}(\theta) + \mathrm{TNR}(\theta)\bigr)
+$$
+
+donde $\mathrm{TPR}$ es sensibilidad (tasa de positivos correctos) y $\mathrm{TNR}$ es especificidad (tasa de negativos correctos). Se considera satisfactorio un valor $\geq 0.8$.
+
+---
+
+## 4. Arquitectura del sistema
+
+El sistema se organiza en tres niveles de abstraccion computacional, cada uno implementado con paradigmas de paralelismo distintos. Todos resuelven el mismo problema matematico y comparten el mismo formato de entrada y salida.
+
+### 4.1 Python secuencial
+
+**Archivo:** `python/sequential.py`
+
+Paradigma: ejecucion secuencial clasica de von Neumann. Un solo nucleo de CPU evalua los K candidatos uno tras otro. No hay paralelismo.
+
+Funcionamiento:
+- En modo `random`, genera un vector W por iteracion con `rng.dirichlet(np.ones(3))` en un bucle `for i in range(k)`.
+- Para cada W, `evaluate()` calcula `P = profiles @ W`, `scores = A @ P`, `AUC = roc_auc_score(y, scores)` y consistencia.
+- La evaluacion de cada candidato usa operaciones matriciales de NumPy (BLAS) sobre un solo W; no hay batching ni paralelismo explicito.
+- Soporta tambien `grid` y `hybrid` (ver seccion 5).
+
+Rol: sirve como **baseline** para medir speedup. Es la implementacion de referencia contra la que se comparan todas las demas. Es tambien la unica implementacion que no requiere compilacion ni dependencias exoticas, lo que la hace portatil.
+
+### 4.2 Python multicore (multiprocessing)
+
+**Archivo:** `python/multicore.py`
+
+Paradigma: paralelismo por **multiples procesos** con memoria independiente (MIMD). Cada proceso worker tiene su propio espacio de direcciones y no comparte variables con los demas.
+
+Fundamento teorico: el problema es **embarazosamente paralelo**: evaluar K candidatos independientes no requiere comunicacion entre workers. Cada worker recibe un subconjunto de candidatos, los evalua y retorna su mejor resultado local. El proceso principal recolecta los resultados y selecciona el mejor global.
+
+Funcionamiento:
+- El proceso principal genera los K vectores W una sola vez con `rng.dirichlet(np.ones(3), size=k)` (en modo random).
+- `_parallel_eval()` divide los candidatos en tareas: chunks de 32 si hay logging en vivo (`LOG_INTERVAL`), o `ceil(n/workers)` en modo benchmark.
+- Distribuye las tareas con `pool.imap_unordered(partial(_eval_chunk, A=..., y=..., profiles=...), tasks)`.
+- Cada worker ejecuta `_eval_chunk(task, A, y, profiles)` sobre su bloque y retorna el mejor resultado local.
+- El proceso principal fusiona los mejores locales y selecciona el mejor global (desempate: mayor consistencia, luego menor indice).
+
+Ventaja: no requiere sincronizacion ni exclusividad mutua. Cada worker es una funcion pura que retorna un valor. No se usa `Manager`, `Queue`, `Lock` ni `Value`.
+
+Consideracion: al ser procesos independientes, la memoria total utilizada es aproximadamente `workers` veces la memoria de un solo proceso (cada worker tiene copia de A, profiles, y). Esto limita la escalabilidad cuando el dataset es grande.
+
+### 4.3 C secuencial
+
+**Archivo:** `C_OpenMP_MPI/scoring_sequential.c`
+
+Paradigma: ejecucion secuencial en C nativo. Sin paralelismo.
+
+Funcionamiento:
+- Implementa el mismo algoritmo que Python secuencial pero en C compilado con `-O3`.
+- Usa libreria matematica estandar (`libm`) para las operaciones.
+- El RNG es PCG64 (Permuted Congruential Generator) con generacion de numeros en el simplex mediante transformacion de Dirichlet via algoritmo de muestreo gamma.
+- Las matrices se almacenan en arreglos planos (row-major) para localidad de cache.
+
+Rol: sirve como **baseline nativo** para medir el overhead de Python. Al eliminar la maquina virtual e interpretacion, muestra el rendimiento crudo del hardware en secuencial.
+
+### 4.4 C OpenMP
+
+**Archivo:** `C_OpenMP_MPI/scoring_openmp.c`
+
+Paradigma: paralelismo por **memoria compartida** (SIMD + MIMD) mediante **directivas de compilacion**. OpenMP sigue el modelo **fork/join**: al entrar en una region paralela, el hilo principal (master) crea un equipo de hilos que ejecutan el codigo en paralelo; al finalizar, los hilos se unen y la ejecucion continua con un solo hilo.
+
+Fundamento teorico: todos los hilos comparten el mismo espacio de memoria (A, profiles, y son globales y de solo lectura). Cada hilo tiene su propio RNG (PCG64 con semilla `seed + thread_id`) para generar candidatos sin contencion. La division del trabajo usa `#pragma omp parallel` con `#pragma omp for schedule(static)` sobre el bucle de candidatos.
+
+Mecanismo de sincronizacion:
+- Cada hilo mantiene su mejor resultado local (`local_best`) y lo guarda en `threads[tid].best`.
+- Fuera de la region paralela, un merge serial compara `threads[t].best` y actualiza el mejor global (sin `critical` ni `reduction`).
+- `evaluate()` (incluida la multiplicacion matriz-vector) corre secuencialmente dentro de cada hilo.
+- En modo `--verbose`, `#pragma omp critical(log_improve)` serializa solo el logging de mejoras en vivo.
+
+Ventaja: el merge no introduce contencion entre hilos. OpenMP permite escalar desde 1 hilo (equivalente a C secuencial) hasta N hilos sin cambiar el codigo fuente.
+
+### 4.5 C MPI
+
+**Archivo:** `C_OpenMP_MPI/scoring_mpi.c`
+
+Paradigma: paralelismo por **paso de mensajes** y **memoria distribuida** (MIMD). Cada proceso (rank) tiene su propio espacio de memoria y se comunica con los demas mediante llamadas a la libreria MPI.
+
+Fundamento teorico: a diferencia de OpenMP (memoria compartida), MPI no presupone que los procesos compartan memoria fisica. Esto permite escalar a multiples nodos en un cluster, pero introduce costo de comunicacion explicita. En este problema, la comunicacion es minima porque el problema es embarazosamente paralelo.
+
+Funcionamiento:
+- El rank 0 carga los datos desde disco.
+- El rank 0 transmite (broadcast) las matrices A, profiles, y y las dimensiones a todos los ranks mediante `MPI_Bcast`.
+- El rank 0 genera todos los candidatos W (PCG64 con semilla `seed`) y los distribuye con `MPI_Scatterv`.
+- Cada rank evalua su bloque recibido (tamano casi uniforme, diferencia de a lo sumo 1).
+- Al finalizar cada fase, `gather_best()` recolecta los mejores locales con `MPI_Gather`, el rank 0 fusiona en serial y difunde el resultado con `MPI_Bcast`.
+- `MPI_Reduce(MPI_MAX)` se usa solo para el tiempo de ejecucion global, no para el mejor candidato.
+- Solo el rank 0 imprime la salida.
+
+Diferencia clave con OpenMP: en MPI cada proceso tiene copia completa de los datos. No hay memoria compartida, por lo que no hay condiciones de carrera sobre las matrices. La sincronizacion ocurre al inicio (broadcast), entre fases (gather/bcast) y al final (reduce de tiempo).
+
+### 4.6 PyCUDA (GPU)
+
+**Archivo:** `CUDA/scoring_pycuda.py`
+
+Paradigma: paralelismo **masivamente paralelo en GPU** (SIMT - Single Instruction Multiple Threads). Cada hilo GPU evalua un candidato W independiente.
+
+Fundamento teorico: las GPUs de NVIDIA organizan los hilos en una jerarquia de **grid** (conjunto de bloques), **bloques** (conjunto de hilos que comparten memoria) y **hilos** (unidad minima de ejecucion). Todos los hilos ejecutan el mismo kernel (codigo) pero sobre datos diferentes.
+
+Arquitectura del kernel:
+- **1 hilo = 1 candidato W.** Cada hilo recibe el indice global de su candidato, calcula `P = profiles @ W`, `scores = A @ P`, y luego `AUC` y `consistencia` en GPU.
+- El kernel calcula AUC y consistencia completamente en la GPU mediante el metodo Mann-Whitney por rangos, con acumulacion en double precision para evitar perdida numerica.
+- El tamanio de bloque es 256 hilos. La grilla se dimensiona como `ceil(K / 256)` bloques.
+
+Memoria:
+- **Memoria compartida:** en modo `full`, cada bloque cachea una columna de A en memoria compartida (`__shared__`) para reducir accesos a memoria global. Tamano: `n_muestras * sizeof(float)` (~8 KB para 2000 muestras).
+- **Memoria global:** A, profiles, labels se copian una sola vez al device al inicio. Los pesos se suben con `upload_weights()` por fase de busqueda; en modo live no hay re-upload por bloque de 256, solo D2H parcial de resultados.
+
+Reduccion:
+- El mejor global se obtiene mediante dos etapas de reduction kernel:
+  - `reduce_best_stage1`: cada bloque reduce sus candidatos a un `BestVal` parcial.
+  - `reduce_best_stage2`: combina los parciales de todos los bloques en un solo resultado global.
+
+Modos de ejecucion:
+- **Modo live** (default): un launch CUDA por bloque (256 candidatos). Permite logging de progreso en vivo con mejoras parciales.
+- **Modo fast** (`--fast` o `--benchmark`): un solo launch sobre todos los K candidatos seguido de reduction completa en GPU. Solo transfiere el mejor resultado de vuelta al host.
+
+Variante precompute:
+- En modo `precompute`, se calcula `B = A @ profiles` una vez en el host y se transfiere a la GPU. Esto reduce el kernel a `scores = B @ W`, eliminando las iteraciones sobre items dentro del kernel. Es mas rapido cuando K es grande, pero requiere almacenar la matriz B (n_muestras x 3).
+
+---
+
+## 5. Estrategias de busqueda
+
+Cada implementacion soporta tres estrategias para explorar el simplex de pesos. La eleccion de estrategia afecta la calidad del AUC encontrado, el costo computacional y la reproducibilidad.
+
+### 5.1 Random search
+
+Genera $K$ vectores $W$ independientes mediante muestreo uniforme sobre el simplex con $\mathrm{Dirichlet}(1, 1, 1)$.
+
+Propiedades:
+- Cada candidato es independiente de los anteriores.
+- La cobertura del simplex es probabilistica: con K suficientemente grande, la probabilidad de aproximarse al optimo global tiende a 1.
+- Es la estrategia mas simple y la que mejor se presta a paralelizacion (no hay dependencia entre candidatos).
+- El costo computacional es lineal en K.
+- No hay riesgo de sobreadaptacion al grid.
+
+Limitacion: no garantiza cubrir regiones especificas del simplex. Dependiendo de K, puede dejar zonas sin explorar.
+
+### 5.2 Grid search
+
+Define una malla regular sobre el simplex. Dada una resolucion $R$, se generan todos los puntos de la forma:
+
+$$
+W_1 = \frac{i}{R}, \qquad W_2 = \frac{j}{R}, \qquad W_3 = \frac{R - i - j}{R}
+$$
+
+para $i, j \geq 0$ con $i + j \leq R$. El numero de puntos es $(R+1)(R+2)/2$.
+
+Propiedades:
+- Cobertura determinista y uniforme del simplex.
+- Reproducible por definicion (no interviene el azar).
+- El numero de puntos crece cuadraticamente con $R$: $K \sim R^2 / 2$.
+- Puede generar mas o menos candidatos que el $K$ solicitado. La resolucion se ajusta automaticamente como $R = \max(1, \lfloor\sqrt{2K}\rfloor)$.
+
+Limitacion: para R pequeno, la granularidad puede omitir el optimo global si este se encuentra entre puntos del grid. Para R grande, K crece rapidamente y el costo computacional puede superar al de random search con el mismo K nominal.
+
+### 5.3 Hybrid search
+
+Combina grid, random y refinamiento local. **La particion de fases depende de la implementacion:**
+
+| Implementacion | Fases |
+|---|---|
+| Python / C secuencial / C OpenMP | Grid fijo `step=0.02` (~1326 pts); luego 50/50 del resto entre random Dirichlet(1,1,1) y local con `alpha = max(w * {300, 1000}, 1e-3)` |
+| C MPI | Random (K candidatos) + refinamiento (`--refine-steps` o 20% de K, semilla `seed+9999`); sin fase grid |
+| PyCUDA | 20% grid (max 2000) + 60% random + resto local con `alpha = max(w * 100, 1e-3)` |
+
+Propiedades:
+- Aprovecha cobertura determinista (grid) y exploracion estocastica (random).
+- La fase local refina alrededor del mejor W encontrado.
+- El costo total es comparable al de random search con el mismo K nominal.
+- La reproducibilidad depende de la semilla en las fases aleatorias.
+
+### 5.4 Comparacion entre estrategias
+
+| Aspecto | Random | Grid | Hybrid |
+|---|---|---|---|
+| Cobertura del simplex | Probabilistica | Determinista uniforme | Grid + aleatoria + local |
+| Reproducibilidad | Depende de seed | Total | Depende de seed (fases 2 y 3) |
+| Costo computacional | $O(K)$ | $O(R^2) \sim O(K)$ | $O(K)$ |
+| Riesgo de omitir optimo | Disminuye con K | Depende de resolucion | Bajo (fase local) |
+| Paralelizacion | Trivial | Trivial | Trivial (fases secuenciales pero cada fase es paralela) |
+| Calidad tipica de AUC | Buena para K grande | Buena para R suficiente | Generalmente la mejor |
+
+---
+
+## 6. Benchmark
+
+### 6.1 Metricas base
+
+Cada ejecucion de benchmark produce las siguientes metricas por implementacion y configuracion:
+
+| Metrica | Descripcion | Formula |
+|---|---|---|
+| Tiempo (s) | Tiempo de busqueda excluyendo carga de datos | $t_{\mathrm{fin}} - t_{\mathrm{inicio}}$ |
+| Speedup | Ganancia respecto al baseline secuencial | $S = T_{\mathrm{python\_sequential}} / T_{\mathrm{impl}}$ |
+| Eficiencia | Speedup normalizado por unidades de paralelismo | $E = S / P$ |
+| Throughput | Candidatos evaluados por segundo | $K / T_{\mathrm{impl}}$ |
+| AUC | Area bajo la curva ROC del mejor W encontrado | $\max \mathrm{AUC}(y, \mathrm{Score}(W))$ |
+| Consistencia | Balanced accuracy maximo del mejor W | $\max_{\theta} \; 0.5 \cdot (\mathrm{TPR}+\mathrm{TNR})$ |
+
+### 6.2 Consideraciones sobre la eficiencia en GPU
+
+Para las implementaciones GPU (PyCUDA), la metrica `parallel_units` corresponde al numero de multiprocesadores (SM) de la GPU, no a hilos o procesos de CPU. Comparar eficiencia GPU como si `parallel_units=14` fuera equivalente a 8 procesos CPU no es tecnicamente valido, porque:
+
+- La GPU ejecuta miles de hilos simultaneamente en cada SM, no un hilo por SM.
+- La metrica $\mathrm{efficiency} = \mathrm{speedup} / \mathrm{parallel\_units}$ para GPU infraestima artificialmente el rendimiento real porque el denominador no refleja la capacidad de paralelismo masivo.
+
+Para GPU se recomienda reportar:
+- **Throughput** (candidatos/segundo) como metrica principal.
+- **Speedup** respecto al baseline secuencial como metrica secundaria.
+- **Eficiencia** solo si se aclara que es una metrica heuristica referida a SMs, no a unidades de ejecucion equivalentes a CPU.
+
+### 6.3 Mediciones pendientes
+
+Las siguientes graficas se generaran a partir de los resultados del benchmark:
+
+- Tiempo vs. K (una curva por implementacion).
+- Speedup vs. K (una curva por implementacion paralela).
+- Eficiencia vs. K (solo CPU paralela: multicore, OpenMP, MPI).
+- Throughput (candidatos/segundo) vs. K.
+- AUC vs. K (calidad de la solucion encontrada).
+- Mejor W por implementacion (comparacion de pesos optimos).
+- Iteracion donde aparece el mejor resultado (convergencia).
+- Heatmap implementacion x K con tiempo o speedup.
+
+---
+
+## 7. Formato de salida estandar
+
+Toda implementacion imprime una linea CSV con las siguientes columnas:
 
 ```text
 implementation,parallel_units,n_items,k,time_sec,auc,consistency,w1,w2,w3,seed,search_mode,iterations_until_best
 ```
 
-| Columna | Descripción |
-|---|---|---|
-| `implementation` | Identificador: `python_sequential`, `python_multicore`, `c_openmp`, `c_mpi`, `cuda_c`, `pycuda` |
-| `parallel_units` | Hilos / procesos / ranks usados |
-| `n_items` | Número de items (N) |
+| Columna | Descripcion |
+|---|---|
+| `implementation` | Identificador: `python_sequential`, `python_multicore`, `c_sequential`, `c_openmp`, `c_mpi`, `pycuda` |
+| `parallel_units` | Hilos (OpenMP), procesos (multicore/MPI) o SMs (GPU) usados |
+| `n_items` | Numero de items (N) del dataset |
 | `k` | Candidatos evaluados |
-| `time_sec` | Tiempo de búsqueda (excluye carga de datos) |
+| `time_sec` | Tiempo de busqueda (excluye carga de datos) |
 | `auc` | AUC del mejor W encontrado |
-| `consistency` | Balanced accuracy máxima |
+| `consistency` | Balanced accuracy maxima |
 | `w1..w3` | Pesos del mejor candidato |
 | `seed` | Semilla de reproducibilidad |
-| `search_mode` | Estrategia: `random` \| `grid` \| `hybrid` |
-| `iterations_until_best` | Iteración donde se encontró el mejor AUC |
+| `search_mode` | Estrategia: `random`, `grid` o `hybrid` |
+| `iterations_until_best` | Iteracion donde se encontro el mejor AUC |
 
-El postprocesado (`scripts/postprocess_benchmark.py`) agrega `speedup = T_seq / T_impl` y `efficiency = speedup / parallel_units`.
-
----
-
-## Estrategia de paralelización
-
-| Implementación | Paradigma | División de trabajo | RNG | Sincronización |
-|---|---|---|---|---|---|
-| Python secuencial | — | batches vectorizados (8192) | `numpy.random.default_rng` | — |
-| Python multicore | Multiprocessing | `K / workers`, seed offset 100003 | `numpy.random.default_rng` por worker | `Pool.map` |
-| C/OpenMP | Memoria compartida | `schedule(static)` sobre for loop | PCG64 por hilo (`seed + tid`) | Merge local→global post-loop vía `#pragma omp critical` |
-| C/MPI | Memoria distribuida | `chunk = ceil(K/size)` por rank | PCG64 por rank (`seed + rank`) | `MPI_Gather` / `MPI_Reduce` (scaffold) |
-| PyCUDA | GPU (float32) | 1 thread = 1 candidato, grilla/bloque/thread | `numpy.random.default_rng` | AUC y consistencia en GPU |
+El pipeline `scripts/benchmark_pipeline.py` genera un CSV enriquecido con datos de hardware (CPU, GPU, RAM). El script `scripts/validate_benchmark_csv.py` valida el formato y contenido del CSV de salida.
 
 ---
 
-## Calidad y verificación
+## 8. Estructura del repositorio
 
-```bash
-# Postprocesar resultados
-python scripts/postprocess_benchmark.py --input results/benchmark_raw.csv --output results/benchmark.csv
-
-# Generar gráficas
-python scripts/plot_benchmark.py --input results/benchmark.csv --out-dir results/plots
-
-# Limpiar datos compilados y resultados
-make clean
+```text
+metagenomic-scoring-systems-hpc/
+├── data/
+│   ├── processed/                  datasets generados
+│   │   └── synthetic_CRC2000x10000_balanced/
+│   ├── scripts/
+│   │   └── generate_dataset.py     generacion de dataset sintetico
+│   └── dataset_manifest.json~HEAD  manifiesto del dataset
+├── python/
+│   ├── __init__.py                 docstring del paquete
+│   ├── common.py                   SearchResult, load_data, evaluate, AUC, consistency
+│   ├── sequential.py               busqueda secuencial (baseline)
+│   ├── multicore.py                busqueda con multiprocessing
+│   └── logger.py                   logger ANSI
+├── C_OpenMP_MPI/
+│   ├── scoring_sequential.c        C secuencial
+│   ├── scoring_openmp.c            OpenMP: 3 estrategias de busqueda
+│   ├── scoring_mpi.c               MPI: 3 estrategias de busqueda
+│   ├── shared/
+│   │   ├── common.h/c              load_data, evaluate, AUC, consistency
+│   │   ├── rng.h/c                 PCG64 + Dirichlet
+│   │   ├── ziggurat.h/c            generador Ziggurat
+│   │   └── logger.h/c              logger ANSI
+│   └── Makefile                    compilacion gcc / mpicc
+├── CUDA/
+│   └── scoring_pycuda.py           PyCUDA: kernel embebido + reduction GPU
+├── scripts/
+│   ├── benchmark_pipeline.py       pipeline de benchmark multi-K con deteccion hardware
+│   └── validate_benchmark_csv.py   valida formato CSV de salida
+├── docs/                           documentacion tecnica
+├── results/
+│   └── plots/                      graficas de benchmark (generadas)
+├── run_all.sh                      pipeline de benchmark automatizado
+├── Makefile                        automatizacion: data, python-*, c-*, benchmark, clean
+├── PROJECT.md                      especificacion contractual del proyecto
+├── fuente_real_dataset_sintetico_crc.md  origen y referencia del dataset
+├── icon.svg                        logo del proyecto
+├── requirements.txt                dependencias Python
+└── .gitignore
 ```
 
-### Criterios de validación
+---
 
-- **AUC > 0.7**: indica separabilidad entre grupos (el azar es 0.5).
-- **Consistencia ≥ 0.8**: balanced accuracy satisfactoria.
-- **Speedup lineal vs P**: escalabilidad fuerte ideal.
-- **Repetir corridas**: una sola ejecución sirve para depurar; el informe final debe reportar promedio ± desviación.
+## 9. Requisitos y ejecucion
+
+### 9.1 Requisitos
+
+| Herramienta | Version | Proposito |
+|---|---|---|
+| Python | >= 3.10 | Implementaciones Python, PyCUDA |
+| GCC | >= 10 | Compilacion OpenMP |
+| MPICH / OpenMPI | >= 3.0 | Compilacion y ejecucion MPI |
+| CUDA toolkit | >= 12 | PyCUDA: compilacion JIT de kernels |
+| make | >= 4 | Automatizacion |
+
+Dependencias Python:
+
+```
+pip install -r requirements.txt
+# numpy>=1.24, pandas>=2.0, matplotlib>=3.7, scikit-learn>=1.3, pycuda>=2024.1
+```
+
+### 9.2 Generar datos
+
+```bash
+# 2000 muestras x 10000 items (default)
+make data
+
+# 100 muestras (desarrollo rapido)
+python data/scripts/generate_dataset.py --n-eval 100 --n-ref 200 --allow-small
+```
+
+### 9.3 Ejecutar implementaciones
+
+```bash
+# Python secuencial (baseline)
+make python-sequential K=10000
+
+# Python multicore
+make python-multicore K=10000 WORKERS=4
+
+# Compilar binarios C
+make c
+
+# C secuencial
+make c-sequential K=10000
+
+# C OpenMP
+make c-openmp K=10000 THREADS=4
+
+# C MPI
+make c-mpi K=10000 MPI_RANKS=4
+
+# PyCUDA
+make python-pycuda K=100000 SEED=42 SEARCH=random
+```
+
+### 9.4 Benchmark completo
+
+```bash
+# Pipeline automatizado
+./run_all.sh
+
+# Pipeline parametrizable (Makefile)
+make benchmark K="5000 10000 20000" SEARCH=random
+
+# Pipeline avanzado con deteccion de hardware
+python scripts/benchmark_pipeline.py --all-strategies --search random --k 5000 10000
+```
 
 ---
 
-## Documentación
+## 10. Documentacion
+
+La documentacion detallada se encuentra en el directorio `docs/`:
 
 | Archivo | Contenido |
 |---|---|
-| `docs/index.md` | Índice de documentación operativa |
-| `docs/00_resumen_tecnico.md` | Resumen técnico del proyecto |
-| `docs/01_convenciones.md` | Convenciones de carpetas, CSV y reglas |
-| `docs/02_modelo_scoring.md` | Modelo matemático de scoring |
-| `docs/03_datos_y_seed.md` | Datos sintéticos, señal y reproducibilidad |
-| `docs/04_python_multiprocessing.md` | Python secuencial y multiprocessing |
-| `docs/05_openmp.md` | OpenMP: RNG, patrón, métricas |
-| `docs/06_mpi.md` | MPI: scaffold, reusa shared/ |
-| `docs/07_cuda.md` | PyCUDA |
-| `docs/08_benchmarks.md` | Pipeline de benchmark |
-| `docs/09_amdahl_gustafson.md` | Amdahl y escalabilidad débil |
-| `docs/10_entregables.md` | Entregables mínimos del proyecto |
-| `PROJECT.md` | Especificación contractual completa |
-
----
-
-## Suposición explícita
-
-El contrato define perfiles `T_i`, `S_i`, `F_i` en `item_profiles.csv` y `profiles_TSF.npy`.
-`T` es magnitud diferencial en `[0,1]`. Ver `docs/11_dataset.md`.
-
----
-
-## Notas operativas
-
-- **No uses `K` pequeño para medir rendimiento.** Crear procesos/hilos/contextos tiene overhead. `K ≥ 10000` para mediciones significativas.
-- **No compares tiempos entre implementaciones si cambiaste N, K, seed o dataset.**
-- **No optimices código que no reproduce el AUC** — si la búsqueda no encuentra el máximo, la optimización de tiempo es irrelevante.
-- **MPI en una sola máquina mide overhead**, no escalabilidad real.
-- **Implementado:** `python/` (sequential, multicore, grid, hybrid), `C/OpenMP` (3 estrategias), generación de datos sintéticos.
-- **Scaffold con TODO:** `C/MPI` (scoring_mpi.c), `CUDA/` (kernel.cu + pycuda.py), `scripts/postprocess_benchmark.py`, `scripts/plot_benchmark.py`.
+| `docs/index.md` | Indice de documentacion |
+| `docs/01_problema.md` | Planteamiento del problema en profundidad |
+| `docs/02_dataset.md` | Dataset: origen, generacion, estructura |
+| `docs/03_modelo_matematico.md` | Modelo matematico detallado |
+| `docs/04_python_secuencial.md` | Python secuencial: implementacion y analisis |
+| `docs/05_python_multicore.md` | Python multicore: multiprocessing |
+| `docs/06_c_secuencial.md` | C secuencial: implementacion nativa |
+| `docs/07_c_openmp.md` | OpenMP: directivas, fork/join, compartido |
+| `docs/08_c_mpi.md` | MPI: memoria distribuida, paso de mensajes |
+| `docs/09_pycuda.md` | PyCUDA: GPU, kernel, reduccion |
+| `docs/10_estrategias_busqueda.md` | Estrategias de busqueda: random, grid, hybrid |
+| `docs/11_benchmark.md` | Benchmark: metricas, metodologia, graficas |
+| `PROJECT.md` | Especificacion contractual completa del proyecto |
+| `fuente_real_dataset_sintetico_crc.md` | Referencia biologica del dataset sintetico |

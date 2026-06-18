@@ -133,40 +133,39 @@ $$
 ### 3.1. Nivel 1 — Python: Baseline
 
 **Librerías:** NumPy, scikit-learn, multiprocessing.  
-**Estrategia:** Random Search sobre $K$ candidatos de $W$ en el simplex.
+**Estrategias:** `random`, `grid` e `hybrid` sobre $K$ candidatos de $W$ en el simplex.
 
-**Flujo:**
+**Flujo (random):**
 
-1. Cargar $A$ e $y$.
-2. Muestrear $K$ vectores $W$ sobre el simplex con `rng.dirichlet`.
+1. Cargar $A$, $y$ y `profiles`.
+2. Muestrear $K$ vectores $W$ sobre el simplex (secuencial: uno por iteración; multicore: bloque con `dirichlet(..., size=K)`).
 3. Para cada $W$: calcular $P \rightarrow \text{Score} = AP \rightarrow \text{AUC}$.
-4. Retornar $W^* = \arg\max \text{AUC}$.
-5. Versión multicore: generar los $K$ pesos **una vez** en el proceso principal,
-   dividir en chunks con `np.array_split`, y evaluar cada chunk con
-   `Pool.map(partial(_eval_chunk, A, y, profiles), chunks)`. Cada worker
-   retorna su mejor local; el proceso principal selecciona el mejor global.
-   Sin variables compartidas ni sincronización explícita.
+4. Retornar $W^* = \arg\max \text{AUC}$ (desempate: mayor consistencia, luego menor índice).
+
+**Versión multicore:** generar los $K$ pesos **una vez** en el proceso principal; `_parallel_eval()` divide en tareas y evalúa con `pool.imap_unordered(partial(_eval_chunk, A, y, profiles), tasks)`. Cada worker retorna su mejor local; el proceso principal selecciona el mejor global. Sin variables compartidas ni sincronización explícita.
 
 ### 3.2. Nivel 2 — C con OpenMP y MPI
 
 #### 3.2.1. C + OpenMP — Memoria Compartida
 
-- Multiplicación $A \cdot P$ con `#pragma omp parallel for`.
-- Actualización del AUC máximo con `#pragma omp critical`.
-- Reducción de acumuladores con la cláusula `reduction(+:acum)`.
+- Paralelizar el bucle de candidatos con `#pragma omp parallel` y `#pragma omp for schedule(static)`.
+- Cada hilo mantiene `local_best` y lo guarda en `threads[tid].best`.
+- Mejor global: merge serial post-loop sobre `threads[t].best` (sin `critical` ni `reduction`).
+- `evaluate()` (incluida $A \cdot P$) corre secuencialmente dentro de cada hilo.
 
 #### 3.2.2. C + MPI — Memoria Distribuida
 
-- El proceso root genera los $K$ candidatos y los distribuye con `MPI_Scatter`.
+- El proceso root genera los $K$ candidatos y los distribuye con `MPI_Scatterv`.
 - Cada proceso evalúa su subconjunto de forma independiente.
-- Recolección del óptimo con `MPI_Reduce` usando la operación `MPI_MAX`.
+- Recolección del óptimo con `MPI_Gather` + merge en rank 0 + `MPI_Bcast`.
+- `MPI_Reduce(MPI_MAX)` solo para el tiempo de ejecución global.
 
 ### 3.3. Nivel 3 — CUDA: Aceleración GPU
 
 - Cada hilo evalúa un candidato $W_k$.
-- El kernel usa memoria compartida para cachear filas de $A$ por bloque.
-- Las transferencias Host-to-Device se realizan una única vez antes del kernel.
-- Reducción del AUC con un `reduction kernel` estándar.
+- El kernel usa memoria compartida para cachear **columnas** de $A$ por bloque.
+- Los datos estáticos (A, profiles, labels) se transfieren H2D una vez; los pesos por fase de búsqueda; en modo live hay D2H parcial por bloque.
+- Reducción del mejor candidato con kernels `reduce_best_stage1` / `reduce_best_stage2` (multi-paso si $K$ es grande).
 
 $$
 \text{Grid} = \left\lceil \frac{K}{\text{BLOCK\_SIZE}} \right\rceil,
@@ -238,25 +237,22 @@ metagenomic-scoring-systems-hpc/
 │   ├── __init__.py
 │   ├── common.py                → [IMPLEMENTADO] SearchResult, load_data, evaluate
 │   ├── sequential.py            → [IMPLEMENTADO] random/grid/hybrid search
-│   ├── multicore.py             → [IMPLEMENTADO] multiprocessing con Pool.map
+│   ├── multicore.py             → [IMPLEMENTADO] multiprocessing con imap_unordered
 │   └── logger.py                → [IMPLEMENTADO] logger ANSI
 ├── C_OpenMP_MPI/
 │   ├── scoring_sequential.c     → [IMPLEMENTADO] baseline C secuencial
 │   ├── scoring_openmp.c         → [IMPLEMENTADO] OpenMP: 3 estrategias
-│   ├── scoring_mpi.c            → [SCAFFOLD] MPI
+│   ├── scoring_mpi.c            → [IMPLEMENTADO] MPI: random/grid/hybrid
 │   ├── shared/                  → [IMPLEMENTADO] common, RNG, ziggurat, logger
 │   └── Makefile
 ├── CUDA/
-│   ├── scoring_kernel.cu        → [SCAFFOLD] CUDA C
-│   ├── scoring_pycuda.py        → [SCAFFOLD] PyCUDA
-│   └── Makefile
+│   └── scoring_pycuda.py        → [IMPLEMENTADO] PyCUDA: 3 estrategias, kernel embebido
 ├── scripts/
-│   ├── postprocess_benchmark.py → [SCAFFOLD]
-│   └── plot_benchmark.py        → [SCAFFOLD]
+│   ├── benchmark_pipeline.py    → [IMPLEMENTADO] pipeline multi-K + detección hardware
+│   └── validate_benchmark_csv.py→ [IMPLEMENTADO] valida formato CSV
 ├── results/
 │   └── plots/
-├── docs/                       → especificación técnica (13 .md + prompts/)
-├── DATASET.md                  → descripción de datasets
+├── docs/                       → especificación técnica (12 .md + prompts/)
 ├── run_all.sh                  → pipeline benchmark
 ├── Makefile
 ├── PROJECT.md
@@ -288,7 +284,7 @@ python data/scripts/generate_dataset.py --n-eval 100 --n-ref 200 --allow-small
 
 Parámetros clave: `--signal`, `--t-strength`, `--metadata-strength`, `--zero-inflation`, `--noise-sigma`.
 
-Ver `DATASET.md` y `docs/03_datos_y_seed.md` para detalles completos.
+Ver `docs/03_datos_y_seed.md` y `docs/11_dataset.md` para detalles completos.
 
 ---
 
