@@ -170,7 +170,7 @@ def hybrid_search(A, y, profiles, k: int, seed: int,
 
     if random_n > 0:
         random_weights = rng.dirichlet(np.ones(3), size=random_n)
-        auc_val, cons_val, w, gidx, _ = _parallel_eval(
+        auc_val, cons_val, w, gidx = _parallel_eval(
             random_weights, workers, pool, A, y, profiles,
             log=log, index_offset=iteration)
         if _is_better(auc_val, cons_val, gidx,
@@ -185,7 +185,7 @@ def hybrid_search(A, y, profiles, k: int, seed: int,
                 continue
             alpha = np.maximum(np.array(best_w) * conc, 1e-3)
             local_weights = rng.dirichlet(alpha, size=count)
-            auc_val, cons_val, w, gidx, _ = _parallel_eval(
+            auc_val, cons_val, w, gidx = _parallel_eval(
                 local_weights, workers, pool, A, y, profiles,
                 log=log, index_offset=iteration)
             if _is_better(auc_val, cons_val, gidx,
