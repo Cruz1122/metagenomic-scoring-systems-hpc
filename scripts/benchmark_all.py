@@ -1,29 +1,16 @@
 #!/usr/bin/env python3
-"""benchmark_all.py — Benchmark completo: 6 implementaciones × 2 búsquedas × N valores de K.
+r"""benchmark_all.py - Una sola ejecucion con todas las implementaciones.
 
-Uso:
-  python scripts/benchmark_all.py
-  python scripts/benchmark_all.py --k-list 1000,10000
-  python scripts/benchmark_all.py --data-dir data/processed/synthetic_CRC2000x500_balanced
+Usa el junction en C:/Users/patol/Desktop/proyecto para evitar espacios.
+Ejecuta C/OpenMP/MPI via WSL, Python y CUDA nativos.
 """
 from __future__ import annotations
-import argparse
-import csv
-import io
-import math
-import os
-import platform
-import re
-import subprocess
-import sys
-import time
+import argparse, csv, io, math, os, platform, re, subprocess, sys, time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -31,502 +18,520 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'python'))
 from logger import Log
 
 
-# ── Resultado normalizado ───────────────────────────────────────────
+# ── Resultado ───────────────────────────────────────────────────────
 @dataclass
 class BenchResult:
-    impl: str
-    search: str
-    K: int
-    actual_K: int
-    time_sec: float
-    auc: float
-    consistency: float
-    w1: float = 0.0
-    w2: float = 0.0
-    w3: float = 0.0
-    workers: int = 1
-    error: str = ''
+    impl: str; search: str; K: int; actual_K: int
+    time_sec: float; auc: float; consistency: float
+    w1: float = 0; w2: float = 0; w3: float = 0
+    workers: int = 1; error: str = ''
 
 
-# ── Detección de entorno ────────────────────────────────────────────
+# ── Path management ─────────────────────────────────────────────────
+PROJECT = Path(__file__).resolve().parent.parent
+
 def _in_wsl() -> bool:
     return 'microsoft' in platform.uname().release.lower()
 
+def _junction() -> Path | None:
+    """Retorna la ruta del junction sin espacios si existe."""
+    j = Path('C:/Users/patol/Desktop/proyecto')
+    return j if j.exists() else None
 
-def _project_root() -> Path:
-    return Path(__file__).resolve().parent.parent
+def _data_dir() -> str:
+    """Data directory para CSV (C/Python) y NPY (CUDA)."""
+    return 'data/processed/synthetic_CRC2000x10000_balanced'
 
+def _cuda_npy_dir() -> str:
+    return f'{_data_dir()}/npy'
 
-def _data_path() -> str:
-    """Retorna data-dir para implementaciones C/Python (CSV loader)."""
-    # Auto-detectar el dataset disponible
-    root = _project_root()
-    candidates = [
-        'data/processed/synthetic_CRC2000x10000_balanced',
-        'data/processed/synthetic_CRC2000x500_balanced',
-    ]
-    for d in candidates:
-        if (root / d).exists():
-            return d
-    return candidates[0]  # fallback
+def _grid_res(K: int) -> int:
+    return max(int((math.sqrt(1 + 8 * K) - 1) / 2), 2)
+def _grid_step(K: int) -> str:
+    return f'{1.0 / _grid_res(K):.6f}'
+def _grid_st(K: int) -> int:
+    return _grid_res(K)
 
-
-def _cuda_data_path(data_dir: str) -> str:
-    return f'{data_dir}/npy'
-
-
-# ── Runners ─────────────────────────────────────────────────────────
-# Cada runner recibe (K, search, workers) y retorna BenchResult.
-
-def _run_cmd(cmd: list[str], timeout: int = 120) -> tuple[str, str, int]:
+# ── Runner helpers ──────────────────────────────────────────────────
+def _run(cmd: list[str], tmo: int = 600) -> tuple[str, str, int]:
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=tmo)
         return r.stdout, r.stderr, r.returncode
-    except FileNotFoundError:
-        return '', f'Comando no encontrado: {cmd[0]}', -1
-    except subprocess.TimeoutExpired:
-        return '', f'Timeout ({timeout}s)', -1
+    except Exception as e:
+        return '', str(e), -1
 
+def _kv(stdout: str, k: str, d: float = 0.0) -> float:
+    m = re.search(rf'{k}=([-\d.e+]+)', stdout)
+    return float(m.group(1)) if m else d
 
-def _check_exe(path: str) -> bool:
-    """Verifica si un ejecutable existe (y no es directorio)."""
-    p = Path(path)
-    return p.exists() and not p.is_dir()
+def _kv_str(stdout: str, k: str, d: str = '') -> str:
+    m = re.search(rf'{k}=(.+)', stdout)
+    return m.group(1).strip() if m else d
 
-
-
-
-def _parse_kv(stdout: str, key: str, default: float = 0.0) -> float:
-    m = re.search(rf'{key}=([-\d.e+]+)', stdout)
-    return float(m.group(1)) if m else default
-
-
-def _parse_kv_str(stdout: str, key: str, default: str = '') -> str:
-    m = re.search(rf'{key}=(.+)', stdout)
-    return m.group(1).strip() if m else default
-
-
-def _parse_best_w(stdout: str) -> tuple[float, float, float]:
+def _best_w(stdout: str) -> tuple[float, float, float]:
     m = re.search(r'best_w=\[([^\]]+)\]', stdout)
     if m:
-        parts = m.group(1).split(',')
-        if len(parts) >= 3:
-            return float(parts[0]), float(parts[1]), float(parts[2])
-    return 0.0, 0.0, 0.0
+        p = m.group(1).split(',')
+        if len(p) >= 3: return float(p[0]), float(p[1]), float(p[2])
+    return 0, 0, 0
 
+# ── Runners ─────────────────────────────────────────────────────────
 
-# ── Runner: Python sequential ──
-def _grid_resolution(K: int) -> int:
-    """Resolución del grid derivada de K: N_grid ≈ K."""
-    return max(int((math.sqrt(1 + 8 * K) - 1) / 2), 2)
-
-def _grid_step(K: int) -> str:
-    """Convierte K a step para Python/OpenMP grid."""
-    res = _grid_resolution(K)
-    return f'{1.0 / res:.6f}'
-
-def _grid_steps(K: int) -> int:
-    """Número de steps para MPI/CUDA grid."""
-    return _grid_resolution(K)
-
-def run_python_seq(K, search, workers, data_dir, log):
-    label = 'python-seq'
-    cmd = [sys.executable, str(_project_root() / 'python/sequential.py'),
-           '--k', str(K), '--seed', '42', '--data-dir', data_dir,
-           '--search', search, '--csv']
-    if search == 'grid':
-        cmd += ['--step', _grid_step(K)]
-    stdout, stderr, rc = _run_cmd(cmd)
-    if rc != 0 or not stdout.strip():
-        return BenchResult(label, search, K, 0, 0, 0, 0, error=stderr or 'no output')
-
-    parts = stdout.strip().split(',')
+def run_py_seq(K, search, workers, data_dir, log, **kw):
+    cmd = [sys.executable, str(PROJECT / 'python/sequential.py'),
+           '--k', str(K), '--seed', '42', '--data-dir', data_dir, '--search', search, '--csv']
+    if search == 'grid': cmd += ['--step', _grid_step(K)]
+    o, e, rc = _run(cmd)
+    if rc or not o.strip(): return BenchResult('python-seq', search, K, 0, 0, 0, 0, error=e or 'no output')
     try:
-        impl, par, n_items, k, t, auc_val, cons, w1, w2, w3, seed, sm, iters = parts[:13]
-        return BenchResult(label, search, int(k), int(k), float(t),
-                           float(auc_val), float(cons), float(w1), float(w2), float(w3), workers=1)
-    except (ValueError, IndexError) as e:
-        return BenchResult(label, search, K, 0, 0, 0, 0, error=str(e))
+        p = o.strip().split(',')
+        return BenchResult('python-seq', search, int(p[3]), int(p[3]), float(p[4]),
+                          float(p[5]), float(p[6]), float(p[8]), float(p[9]), float(p[10]), 1)
+    except Exception as ex: return BenchResult('python-seq', search, K, 0, 0, 0, 0, error=str(ex))
 
-
-# ── Runner: C sequential (via WSL con bash) ──
-def run_c_seq(K, search, workers, data_dir, log):
-    label = 'c-seq'
-    if _in_wsl():
-        exe = str(_project_root() / 'C_OpenMP_MPI/scoring_sequential')
-    else:
-        exe = str(_project_root() / 'C_OpenMP_MPI/scoring_sequential.exe')
-    if not _check_exe(exe):
-        return BenchResult(label, search, K, 0, 0, 0, 0, error=f'binario no encontrado')
-    cmd = [exe, '--k', str(K), '--seed', '42', '--data-dir', data_dir]
-    stdout, stderr, rc = _run_cmd(cmd)
-    if rc != 0:
-        return BenchResult(label, search, K, 0, 0, 0, 0, error=stderr or f'exit={rc}')
-
-    t = _parse_kv(stdout, 'time_sec')
-    auc_val = _parse_kv(stdout, 'best_auc')
-    w1, w2, w3 = _parse_best_w(stdout)
-    return BenchResult(label, search, K, K, t, auc_val, 0.0, w1, w2, w3, workers=1)
-
-
-# ── Runner: Python multiprocessing ──
-def run_python_mp(K, search, workers, data_dir, log):
-    label = f'python-mp({workers})'
-    cmd = [sys.executable, str(_project_root() / 'python/multicore.py'),
+def run_py_mp(K, search, workers, data_dir, log, **kw):
+    cmd = [sys.executable, str(PROJECT / 'python/multicore.py'),
            '--k', str(K), '--seed', '42', '--data-dir', data_dir,
            '--search', search, '--workers', str(workers), '--csv']
-    if search == 'grid':
-        cmd += ['--step', _grid_step(K)]
-    stdout, stderr, rc = _run_cmd(cmd)
-    if rc != 0 or not stdout.strip():
-        return BenchResult(label, search, K, 0, 0, 0, 0, error=stderr or 'no output')
-
-    parts = stdout.strip().split(',')
+    if search == 'grid': cmd += ['--step', _grid_step(K)]
+    o, e, rc = _run(cmd)
+    if rc or not o.strip(): return BenchResult(f'python-mp({workers})', search, K, 0, 0, 0, 0, error=e or 'no output')
     try:
-        impl, par, n_items, k, t, auc_val, cons, w1, w2, w3, seed, sm, iters = parts[:13]
-        return BenchResult(label, search, int(k), int(k), float(t),
-                           float(auc_val), float(cons), float(w1), float(w2), float(w3), workers=workers)
-    except (ValueError, IndexError) as e:
-        return BenchResult(label, search, K, 0, 0, 0, 0, error=str(e))
+        p = o.strip().split(',')
+        return BenchResult(f'python-mp({workers})', search, int(p[3]), int(p[3]), float(p[4]),
+                          float(p[5]), float(p[6]), float(p[8]), float(p[9]), float(p[10]), workers)
+    except Exception as ex: return BenchResult(f'python-mp({workers})', search, K, 0, 0, 0, 0, error=str(ex))
 
+def _wsl_run(bin_rel: str, args: list[str], label: str, search: str, K: int, data_dir: str, workers: int) -> BenchResult:
+    """Ejecuta un binario de Linux via WSL (usa junction para path sin espacios)."""
+    j = _junction()
+    if not j:
+        return BenchResult(label, search, K, 0, 0, 0, 0, error='junction no disponible')
+    wsl_root = f'/mnt/c/Users/patol/Desktop/proyecto'
+    env = {**os.environ, 'MSYS2_ARG_CONV_EXCL': '*', 'WSLENV': 'MSYS2_ARG_CONV_EXCL/w'}
+    cmd = ['wsl', '-d', 'Ubuntu', '--cd', f'{wsl_root}',
+           f'{wsl_root}/{bin_rel}'] + args
+    o, e, rc = _run(cmd, tmo=300)
+    if rc: return BenchResult(label, search, K, 0, 0, 0, 0, error=e or f'exit={rc}')
 
-# ── Runner: OpenMP ──
-def run_openmp(K, search, workers, data_dir, log):
-    n_threads = workers
-    label = f'openmp({n_threads})'
-    exe = str(_project_root() / ('C_OpenMP_MPI/scoring_openmp' if _in_wsl() else 'C_OpenMP_MPI/scoring_openmp.exe'))
-    if not _check_exe(exe):
-        return BenchResult(label, search, K, 0, 0, 0, 0, error=f'binario no encontrado')
+    if 'scoring_sequential' in bin_rel or 'scoring_openmp' in bin_rel:
+        t = _kv(o, 'time_sec'); a = _kv(o, 'best_auc')
+        w1, w2, w3 = _best_w(o)
+        return BenchResult(label, search, K, K, t, a, 0, w1, w2, w3, workers)
+    if 'scoring_mpi' in bin_rel:
+        for line in o.split('\n'):
+            if line.strip().startswith('c_mpi,'):
+                p = line.strip().split(',')
+                if len(p) >= 12:
+                    return BenchResult(label, search, K, int(p[4]), float(p[6]),
+                                      float(p[7]), float(p[8]), float(p[9]), float(p[10]), float(p[11]), workers)
+        return BenchResult(label, search, K, 0, 0, 0, 0, error='MPI: no CSV line')
+    return BenchResult(label, search, K, 0, 0, 0, 0, error='unknown binary')
 
-    if search == 'grid':
-        cmd = [exe, '--k', str(K), '--seed', '42', '--data-dir', data_dir,
-               '--search', 'grid', '--threads', str(n_threads), '--step', _grid_step(K)]
-    else:
-        cmd = [exe, '--k', str(K), '--seed', '42', '--data-dir', data_dir,
-               '--search', search, '--threads', str(n_threads)]
-    stdout, stderr, rc = _run_cmd(cmd)
-    if rc != 0:
-        return BenchResult(label, search, K, 0, 0, 0, 0, error=stderr)
-
-    t = _parse_kv(stdout, 'time_sec')
-    auc_val = _parse_kv(stdout, 'best_auc')
-    k_found = int(_parse_kv(stdout, 'K'))
-    w1, w2, w3 = _parse_best_w(stdout)
-    return BenchResult(label, search, K, k_found if k_found > 0 else K, t, auc_val, 0.0, w1, w2, w3, workers=n_threads)
-
-
-# ── Runner: MPI ──
-def run_mpi(K, search, workers, data_dir, log):
-    n_ranks = workers
-    label = f'mpi({n_ranks})'
-
-    # Verificar binario MPI
-    exe = str(_project_root() / ('C_OpenMP_MPI/scoring_mpi' if _in_wsl() else 'C_OpenMP_MPI/scoring_mpi.exe'))
-    if not _check_exe(exe):
-        return BenchResult(label, search, K, 0, 0, 0, 0, error=f'binario no encontrado')
-
-    # Detectar mpirun/mpiexec
-    launcher = 'mpirun'
+def run_c_seq(K, search, workers, data_dir, log, **kw):
     if _in_wsl():
+        exe = str(PROJECT / 'C_OpenMP_MPI/scoring_sequential')
+        if not exe.startswith('/'): return BenchResult('c-seq', search, K, 0, 0, 0, 0, error='WSL path needed')
+        cmd = [exe, '--k', str(K), '--seed', '42', '--data-dir', data_dir]
+        o, e, rc = _run(cmd)
+        if rc: return BenchResult('c-seq', search, K, 0, 0, 0, 0, error=e)
+        t = _kv(o, 'time_sec'); a = _kv(o, 'best_auc'); w1, w2, w3 = _best_w(o)
+        return BenchResult('c-seq', search, K, K, t, a, 0, w1, w2, w3, 1)
+    else:
+        return _wsl_run('C_OpenMP_MPI/scoring_sequential',
+                       ['--k', str(K), '--seed', '42', '--data-dir', data_dir],
+                       'c-seq', search, K, data_dir, 1)
+
+def run_openmp(K, search, workers, data_dir, log, **kw):
+    n = workers
+    if _in_wsl():
+        exe = str(PROJECT / 'C_OpenMP_MPI/scoring_openmp')
+        args = ['--k', str(K), '--seed', '42', '--data-dir', data_dir,
+                '--search', search, '--threads', str(n)]
+        if search == 'grid': args += ['--step', _grid_step(K)]
+        o, e, rc = _run([exe] + args)
+        if rc: return BenchResult(f'openmp({n})', search, K, 0, 0, 0, 0, error=e)
+        t = _kv(o, 'time_sec'); a = _kv(o, 'best_auc'); kf = int(_kv(o, 'K')); w1, w2, w3 = _best_w(o)
+        return BenchResult(f'openmp({n})', search, K, kf if kf else K, t, a, 0, w1, w2, w3, n)
+    else:
+        args = ['--k', str(K), '--seed', '42', '--data-dir', data_dir,
+                '--search', search, '--threads', str(n)]
+        if search == 'grid': args += ['--step', _grid_step(K)]
+        return _wsl_run('C_OpenMP_MPI/scoring_openmp', args, f'openmp({n})', search, K, data_dir, n)
+
+def run_mpi(K, search, workers, data_dir, log, **kw):
+    n = workers
+    if _in_wsl():
+        exe = str(PROJECT / 'C_OpenMP_MPI/scoring_mpi')
+        launcher = 'mpirun'
         for mp in ['mpirun', 'mpiexec']:
             if subprocess.run(['which', mp], capture_output=True).returncode == 0:
-                launcher = mp; break
+                launcher = mp
+                break
         else:
-            return BenchResult(label, search, K, 0, 0, 0, 0, error='mpirun/mpiexec no encontrado (WSL)')
-    else:
-        for mp in ['mpiexec', 'mpirun']:
-            if subprocess.run(f'where {mp}', shell=True, capture_output=True).returncode == 0:
-                launcher = mp; break
+            return BenchResult(f'mpi({n})', search, K, 0, 0, 0, 0, error='mpirun not found')
+        if search == 'grid':
+            cmd = [launcher, '-np', str(n), exe, '--strategy', 'grid',
+                   '--grid-steps', str(_grid_st(K)), '--data-dir', data_dir]
         else:
-            return BenchResult(label, search, K, 0, 0, 0, 0, error='mpirun/mpiexec no encontrado (Windows)')
-
-    if search == 'grid':
-        cmd = [launcher, '-np', str(n_ranks), exe,
-               '--strategy', 'grid', '--grid-steps', str(_grid_steps(K)),
-               '--data-dir', data_dir]
+            cmd = [launcher, '-np', str(n), exe, '--strategy', 'random',
+                   '--k', str(K), '--seed', '42', '--data-dir', data_dir]
+        o, e, rc = _run(cmd, tmo=300)
+        if rc: return BenchResult(f'mpi({n})', search, K, 0, 0, 0, 0, error=e)
+        for line in o.split('\n'):
+            if line.strip().startswith('c_mpi,'):
+                p = line.strip().split(',')
+                if len(p) >= 12:
+                    return BenchResult(f'mpi({n})', search, K, int(p[4]), float(p[6]),
+                                      float(p[7]), float(p[8]), float(p[9]), float(p[10]), float(p[11]), n)
+        return BenchResult(f'mpi({n})', search, K, 0, 0, 0, 0, error='no CSV line')
     else:
-        cmd = [launcher, '-np', str(n_ranks), exe,
-               '--strategy', 'random', '--k', str(K), '--seed', '42',
-               '--data-dir', data_dir]
-    stdout, stderr, rc = _run_cmd(cmd, timeout=600)
-    if rc != 0:
-        return BenchResult(label, search, K, 0, 0, 0, 0, error=stderr)
+        args = ['--strategy', 'random', '--k', str(K), '--seed', '42', '--data-dir', data_dir] if search != 'grid' \
+               else ['--strategy', 'grid', '--grid-steps', str(_grid_st(K)), '--data-dir', data_dir]
+        return _wsl_run('C_OpenMP_MPI/scoring_mpi', args, f'mpi({n})', search, K, data_dir, n)
 
-    # Parse CSV output (buscar línea que empieza con "c_mpi,")
-    csv_line = ''
-    for line in stdout.split('\n'):
-        if line.strip().startswith('c_mpi,'):
-            csv_line = line.strip()
-            break
-    if not csv_line:
-        return BenchResult(label, search, K, 0, 0, 0, 0, error=f'no CSV line found')
-
-    try:
-        parts = csv_line.split(',')
-        if len(parts) < 12:
-            return BenchResult(label, search, K, 0, 0, 0, 0, error=f'parse error: {csv_line[:200]}')
-        k_val = int(parts[4])
-        t = float(parts[6])
-        auc_val = float(parts[7])
-        cons_val = float(parts[8])
-        w1, w2, w3 = float(parts[9]), float(parts[10]), float(parts[11])
-        return BenchResult(label, search, K, k_val, t, auc_val, cons_val, w1, w2, w3, workers=n_ranks)
-    except (ValueError, IndexError) as e:
-        return BenchResult(label, search, K, 0, 0, 0, 0, error=f'{e}: {csv_line[:100]}')
-
-
-# ── Runner: CUDA C ──
-def run_cuda(K, search, workers, data_dir, log):
-    label = 'cuda_c'
-    npy_dir = _cuda_data_path(data_dir)
-    # Buscar binario CUDA (.exe en Windows, sin extensión en WSL)
-    exe_candidates = [
-        str(_project_root() / 'CUDA/scoring_cuda.exe'),
-        str(_project_root() / 'CUDA/scoring_cuda'),
-    ]
-    exe = None
-    for e in exe_candidates:
-        if _check_exe(e):
-            exe = e
-            break
-    if exe is None:
-        return BenchResult(label, search, K, 0, 0, 0, 0,
-                           error=f'binario no encontrado: intenté {exe_candidates[0]}')
-
+def run_cuda(K, search, workers, data_dir, log, **kw):
+    exe = str(PROJECT / 'CUDA/scoring_cuda.exe')
+    if not os.path.exists(exe):
+        return BenchResult('cuda_c', search, K, 0, 0, 0, 0, error='binario no encontrado')
+    npy = _cuda_npy_dir()
     if search == 'grid':
         cmd = [exe, '--k', str(K), '--seed', '42', '--search', 'grid',
-               '--data-dir', npy_dir, '--grid-resolution', str(_grid_steps(K))]
+               '--data-dir', npy, '--grid-resolution', str(_grid_st(K))]
     else:
-        cmd = [exe, '--k', str(K), '--seed', '42', '--search', 'random',
-               '--data-dir', npy_dir]
-    stdout, stderr, rc = _run_cmd(cmd, timeout=600)
-    if rc != 0:
-        return BenchResult(label, search, K, 0, 0, 0, 0, error=stderr)
+        cmd = [exe, '--k', str(K), '--seed', '42', '--search', 'random', '--data-dir', npy]
+    o, e, rc = _run(cmd, tmo=600)
+    if rc: return BenchResult('cuda_c', search, K, 0, 0, 0, 0, error=e)
+    for line in o.split('\n'):
+        if line.strip().startswith('cuda_c,'):
+            p = line.strip().split(',')
+            if len(p) >= 14:
+                return BenchResult('cuda_c', search, K, int(p[4]), float(p[11]),
+                                  float(p[6]), float(p[7]), float(p[8]), float(p[9]), float(p[10]), 1)
+    return BenchResult('cuda_c', search, K, 0, 0, 0, 0, error='no CSV line')
 
-    # Parse CSV: cuda_c,search,mode,K,actual_k,N,best_auc,best_consistency,w1,w2,w3,time_sec,seed,block_size
-    try:
-        parts = stdout.strip().split(',')
-        if len(parts) < 14:
-            return BenchResult(label, search, K, 0, 0, 0, 0, error=f'parse error: {stdout[:200]}')
-        actual_k = int(parts[4])
-        t = float(parts[11])
-        auc_val = float(parts[6])
-        cons_val = float(parts[7])
-        w1, w2, w3 = float(parts[8]), float(parts[9]), float(parts[10])
-        return BenchResult(label, search, K, actual_k, t, auc_val, cons_val, w1, w2, w3, workers=1)
-    except (ValueError, IndexError) as e:
-        return BenchResult(label, search, K, 0, 0, 0, 0, error=str(e))
-
-
-# ── Registry ────────────────────────────────────────────────────────
-RUNNERS: list[tuple[str, Callable]] = [
-    ('Python sequential', run_python_seq),
+RUNNERS = [
+    ('Python sequential', run_py_seq),
     ('C sequential',      run_c_seq),
-    ('Python multiproc.', run_python_mp),
+    ('Python multiproc.', run_py_mp),
     ('OpenMP',            run_openmp),
     ('MPI',               run_mpi),
     ('CUDA C',            run_cuda),
 ]
 
 
-# ── Logger wrapper ─────────────────────────────────────────────────
-class BenchLogger:
-    def __init__(self):
-        self.log = Log('benchmark_all', 0, 0)
-        self._count = 0
-
-    def section(self, title: str):
-        print(f'\n  {"=" * 56}')
-        print(f'  {title:^56}')
-        print(f'  {"=" * 56}\n')
-
-    def result_line(self, r: BenchResult, elapsed: float):
-        self._count += 1
-        if r.error:
-            print(f'  {r.impl:25s}  ERROR: {r.error[:60]}')
-        else:
-            speedup = f'{elapsed / r.time_sec:.1f}x' if r.time_sec > 0 else 'N/A'
-            print(f'  {r.impl:25s}  AUC={r.auc:.6f}  time={r.time_sec:.4f}s  speedup={speedup}')
-
-    def table_header(self, k: int, search: str):
-        print(f'\n  {"-" * 70}')
-        print(f'  K={k:,}  search={search}')
-        print(f'  {"-" * 70}')
-        print(f'  {"Implementacion":25s}  {"AUC":>10s}  {"Tiempo":>10s}  {"Speedup":>10s}')
-        print(f'  {"-" * 70}')
-
-    def summary(self, results: list[BenchResult]):
-        print(f'\n  {"=" * 70}')
-        print(f'  {"RESUMEN FINAL":^68}')
-        print(f'  {"=" * 70}')
-        # Pivot table
-        df = pd.DataFrame([{
-            'impl': r.impl, 'search': r.search, 'K': r.K,
-            'time': r.time_sec, 'auc': r.auc
-        } for r in results if not r.error])
-
-        if df.empty:
-            print('  No hay resultados válidos')
-            return
-
-        for search in ['random', 'grid']:
-            sub = df[df.search == search]
-            if sub.empty:
-                continue
-            print(f'\n  search={search}')
-            print(f'  {"K":>8s}  {"Implementación":25s}  {"Tiempo":>10s}  {"AUC":>10s}')
-            print(f'  {"-" * 60}')
-            for _, row in sub.sort_values(['K', 'time']).iterrows():
-                print(f'  {row.K:>8,d}  {row.impl:25s}  {row.time:>10.4f}s  {row.auc:>10.6f}')
-
-
-# ── Gráficas Plotly ────────────────────────────────────────────────
-def make_plots(results: list[BenchResult], output_dir: Path):
+# ── Logger & Plots ──────────────────────────────────────────────────
+def make_plots(results: list[BenchResult], out_dir: Path):
     df = pd.DataFrame([{
         'impl': r.impl, 'search': r.search, 'K': r.K,
-        'time': r.time_sec, 'auc': r.auc, 'speedup': 0.0,
-        'workers': r.workers,
+        'time': r.time_sec, 'auc': r.auc
     } for r in results if not r.error and r.time_sec > 0])
+    if df.empty: return
 
-    if df.empty:
-        return
-
-    # Calcular speedup base (Python sequential)
-    py_seq = df[(df.impl == 'python-seq')].copy()
-    py_seq = py_seq.rename(columns={'time': 'base_time'})[['search', 'K', 'base_time']]
+    py_seq = df[df.impl == 'python-seq'][['search', 'K', 'time']].rename(columns={'time': 'base'})
     df = df.merge(py_seq, on=['search', 'K'], how='left')
-    df['speedup'] = df['base_time'] / df['time']
+    df['speedup'] = df['base'] / df['time']
+    df['short_impl'] = df['impl'].replace({
+        'python-seq': 'Python\nSeq', 'c-seq': 'C Seq',
+        'python-mp(4)': 'Python\nMP', 'openmp(4)': 'OpenMP',
+        'mpi(4)': 'MPI', 'cuda_c': 'CUDA'
+    })
 
-    color_map = {
-        'python-seq': '#1f77b4', 'c-seq': '#ff7f0e',
-        'python-mp(4)': '#2ca02c', 'openmp(4)': '#d62728',
-        'mpi(4)': '#9467bd', 'cuda_c': '#8c564b',
-    }
+    cmap = {'python-seq':'#1f77b4','c-seq':'#ff7f0e','python-mp(4)':'#2ca02c',
+            'openmp(4)':'#d62728','mpi(4)':'#9467bd','cuda_c':'#8c564b'}
+    impl_order = ['python-seq','c-seq','python-mp(4)','openmp(4)','mpi(4)','cuda_c']
+    impl_labels = ['Python\nSeq','C Seq','Python\nMP','OpenMP','MPI','CUDA']
 
-    # 1. Tiempos por K y search
-    fig1 = make_subplots(rows=1, cols=2, subplot_titles=['Random search', 'Grid search'],
-                         shared_yaxes=True)
-    for idx, search in enumerate(['random', 'grid'], 1):
-        sub = df[df.search == search]
-        for impl in sorted(sub.impl.unique()):
+    k_str_map = {10:'10',100:'100',500:'500',1000:'1K',5000:'5K',10000:'10K',100000:'100K'}
+
+    # ── Grafica 1: Speedup (barras agrupadas) ─────────────────────
+    fig1 = go.Figure()
+    ks_sorted = sorted(df.K.unique())
+    k_labels = [k_str_map.get(k, str(k)) for k in ks_sorted]
+
+    for impl in impl_order:
+        d = df[(df.impl == impl) & (df.impl != 'python-seq')]
+        if d.empty: continue
+        vals = []
+        for k in ks_sorted:
+            sub = d[(d.K == k)]
+            sp = sub['speedup'].values[0] if len(sub) > 0 else None
+            vals.append(sp)
+        fig1.add_trace(go.Bar(
+            name=impl_labels[impl_order.index(impl)],
+            x=k_labels, y=vals,
+            marker_color=cmap[impl],
+            hovertemplate='K=%{x}<br>Speedup=%{y:.1f}x<extra></extra>',
+            width=0.6 / len(impl_order),
+            offsetgroup=impl_order.index(impl),
+        ))
+
+    fig1.update_layout(
+        barmode='group', bargap=0.15, bargroupgap=0.05,
+        title=dict(text='Speedup vs Python Secuencial', x=0.5, font=dict(size=16)),
+        xaxis=dict(title='Numero de candidatos (K)', tickangle=45),
+        yaxis=dict(title='Speedup (veces mas rapido)',
+                   type='log',
+                   tickmode='array',
+                   tickvals=[1,2,5,10,20,50,100,200,500,1000],
+                   ticktext=['1x','2x','5x','10x','20x','50x','100x','200x','500x','1000x'],
+                   gridcolor='#eee', gridwidth=1),
+        legend=dict(orientation='h', y=-0.25, x=0.5, xanchor='center', font=dict(size=11)),
+        template='plotly_white', height=500, width=1000,
+        hovermode='x unified',
+        margin=dict(b=80),
+    )
+    # Linea de referencia en 1x
+    fig1.add_hline(y=1, line=dict(color='gray', width=1, dash='dash'))
+
+    fig1.write_html(str(out_dir / 'speedup.html'))
+    try: fig1.write_image(str(out_dir / 'speedup.png'), width=1000, height=500, scale=2)
+    except: pass
+    print('  Grafica 1: speedup.html/png')
+
+    # ── Grafica 2: Tiempos + AUC combinada ────────────────────────
+    fig2 = make_subplots(rows=2, cols=2,
+                         subplot_titles=('Tiempos - Random', 'Tiempos - Grid',
+                                         'AUC - Random', 'AUC - Grid'),
+                         vertical_spacing=0.15, horizontal_spacing=0.12,
+                         shared_xaxes='columns', shared_yaxes='rows')
+
+    for idx, (srch, col) in enumerate([('random', 1), ('grid', 2)]):
+        sub = df[df.search == srch]
+        for impl in impl_order:
             d = sub[sub.impl == impl].sort_values('K')
-            color = color_map.get(impl, '#333333')
-            fig1.add_trace(
-                go.Scatter(x=d['K'], y=d['time'], mode='lines+markers',
-                           name=impl, legendgroup=impl,
-                           marker=dict(color=color), line=dict(color=color)),
-                row=1, col=idx
-            )
-        fig1.update_xaxes(title_text='K', type='log', row=1, col=idx)
-        fig1.update_yaxes(title_text='Tiempo (s)', type='log', row=1, col=idx)
+            if d.empty: continue
+            color = cmap[impl]
+            label = impl_labels[impl_order.index(impl)]
 
-    fig1.write_html(str(output_dir / 'times.html'))
-    try:
-        fig1.write_image(str(output_dir / 'times.png'), width=1200, height=500)
-    except Exception:
-        pass
+            # Tiempos (fila 1)
+            fig2.add_trace(go.Scatter(
+                x=d['K'], y=d['time'], mode='lines+markers',
+                name=label, legendgroup=impl,
+                marker=dict(size=8, color=color, line=dict(width=1, color='white')),
+                line=dict(width=2.5, color=color),
+                hovertemplate=f'<b>{label}</b><br>K=%{{x}}<br>Time=%{{y:.4f}}s<extra></extra>'
+            ), row=1, col=col)
 
-    # 2. Speedup
-    fig2 = make_subplots(rows=1, cols=2, subplot_titles=['Random search', 'Grid search'],
-                         shared_yaxes=True)
-    for idx, search in enumerate(['random', 'grid'], 1):
-        sub = df[(df.search == search) & (df.impl != 'python-seq')]
-        for impl in sorted(sub.impl.unique()):
+            # AUC (fila 2)
+            fig2.add_trace(go.Scatter(
+                x=d['K'], y=d['auc'], mode='lines+markers',
+                name=label, legendgroup=impl, showlegend=False,
+                marker=dict(size=8, color=color, symbol='diamond',
+                           line=dict(width=1, color='white')),
+                line=dict(width=2, color=color, dash='dot'),
+                hovertemplate=f'<b>{label}</b><br>K=%{{x}}<br>AUC=%{{y:.6f}}<extra></extra>'
+            ), row=2, col=col)
+
+        # Configurar ejes X
+        for row, col in [(1,1),(1,2),(2,1),(2,2)]:
+            fig2.update_xaxes(
+                title_text='Candidatos (K)' if row == 2 else '',
+                type='log', tickangle=45,
+                tickvals=list(k_str_map.keys()),
+                ticktext=list(k_str_map.values()),
+                gridcolor='#eee', gridwidth=1,
+                row=row, col=col)
+
+        # Ejes Y tiempos
+        fig2.update_yaxes(title_text='Tiempo (s)' if col == 1 else '',
+                          type='log', row=1, col=col,
+                          tickformat='.1f',
+                          gridcolor='#eee', gridwidth=1)
+
+        # Ejes Y AUC
+        fig2.update_yaxes(title_text='AUC' if col == 1 else '',
+                          range=[0.5, 1.0], row=2, col=col,
+                          tickformat='.3f',
+                          gridcolor='#eee', gridwidth=1)
+
+    fig2.update_layout(
+        title=dict(text='Rendimiento por Implementacion', x=0.5, font=dict(size=16)),
+        legend=dict(orientation='h', y=-0.08, x=0.5, xanchor='center', font=dict(size=11)),
+        template='plotly_white', height=700, width=1100,
+        hovermode='x unified',
+        margin=dict(b=80),
+    )
+    fig2.write_html(str(out_dir / 'times_auc.html'))
+    try: fig2.write_image(str(out_dir / 'times_auc.png'), width=1100, height=700, scale=2)
+    except: pass
+    print('  Grafica 2: times_auc.html/png')
+
+    # ── Grafica 3: AUC detalle (scatter con jitter) ───────────────
+    fig3 = go.Figure()
+    for srch, dash in [('random', 'solid'), ('grid', 'dot')]:
+        sub = df[df.search == srch]
+        for impl in impl_order:
             d = sub[sub.impl == impl].sort_values('K')
-            color = color_map.get(impl, '#333333')
-            fig2.add_trace(
-                go.Bar(x=[str(k) for k in d['K']], y=d['speedup'],
-                       name=impl, legendgroup=impl,
-                       marker_color=color),
-                row=1, col=idx
-            )
-        fig2.update_xaxes(title_text='K', row=1, col=idx)
-        fig2.update_yaxes(title_text='Speedup vs Python seq.', type='log', row=1, col=idx)
+            if d.empty: continue
+            fig3.add_trace(go.Scatter(
+                x=d['K'], y=d['auc'],
+                mode='lines+markers',
+                name=f'{impl_labels[impl_order.index(impl)]} ({srch})',
+                legendgroup=f'{impl}_{srch}',
+                marker=dict(size=9, color=cmap[impl],
+                           symbol='circle' if srch == 'random' else 'x',
+                           line=dict(width=1, color='white')),
+                line=dict(width=2, color=cmap[impl], dash=dash),
+                hovertemplate='<b>%{legendgroup}</b><br>K=%{x}<br>AUC=%{y:.6f}<extra></extra>'
+            ))
 
-    fig2.write_html(str(output_dir / 'speedup.html'))
-    try:
-        fig2.write_image(str(output_dir / 'speedup.png'), width=1200, height=500)
-    except Exception:
-        pass
+    fig3.add_hline(y=0.75, line=dict(color='green', width=1, dash='dash'),
+                   annotation_text='AUC util (>0.75)')
+    fig3.add_hline(y=0.5, line=dict(color='red', width=1, dash='dot'),
+                   annotation_text='AUC aleatorio (0.5)')
 
-    # 3. Tabla resumen HTML
-    pivot = df.pivot_table(index=['search', 'K'], columns='impl',
-                           values='time', aggfunc='first')
-    pivot_html = pivot.to_html(float_format='%.4f')
-    with open(output_dir / 'summary.html', 'w') as f:
-        f.write('<html><body><h1>Benchmark Summary</h1>\n')
-        f.write('<h2>Times (seconds)</h2>\n')
-        f.write(pivot_html)
-        pivot_auc = df.pivot_table(index=['search', 'K'], columns='impl',
-                                    values='auc', aggfunc='first')
-        f.write('<h2>AUC</h2>\n')
-        f.write(pivot_auc.to_html(float_format='%.6f'))
-        f.write('</body></html>')
+    fig3.update_layout(
+        title=dict(text='Comparacion de AUC entre Implementaciones', x=0.5, font=dict(size=16)),
+        xaxis=dict(title='Candidatos (K)', type='log',
+                   tickvals=list(k_str_map.keys()),
+                   ticktext=list(k_str_map.values()),
+                   tickangle=45, gridcolor='#eee'),
+        yaxis=dict(title='AUC (Area Under Curve)',
+                   range=[0.45, 1.0], tickformat='.3f',
+                   gridcolor='#eee', gridwidth=1),
+        legend=dict(orientation='h', y=-0.35, x=0.5, xanchor='center',
+                   font=dict(size=10)),
+        template='plotly_white', height=550, width=1100,
+        hovermode='x unified',
+        margin=dict(b=100),
+    )
+    fig3.write_html(str(out_dir / 'auc.html'))
+    try: fig3.write_image(str(out_dir / 'auc.png'), width=1100, height=550, scale=2)
+    except: pass
+    print('  Grafica 3: auc.html/png')
 
-    print(f'\n  Gráficas guardadas en: {output_dir}/')
+    # ── Summary HTML mejorado ──────────────────────────────────────
+    pivot_time = df.pivot_table(index=['search', 'K'], columns='impl',
+                                 values='time', aggfunc='first')
+    pivot_speedup = df.pivot_table(index=['search', 'K'], columns='impl',
+                                    values='speedup', aggfunc='first')
+    pivot_auc = df.pivot_table(index=['search', 'K'], columns='impl',
+                                values='auc', aggfunc='first')
+
+    html = """<!DOCTYPE html><html><head><meta charset="utf-8">
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+        h1 { color: #333; text-align: center; }
+        h2 { color: #555; margin-top: 40px; border-bottom: 2px solid #ddd; padding-bottom: 8px; }
+        table { border-collapse: collapse; width: 100%; margin: 20px 0; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        th { background: #4a90d9; color: white; padding: 12px 8px; text-align: center; font-size: 13px; }
+        td { padding: 8px; text-align: center; border-bottom: 1px solid #eee; font-size: 12px; }
+        tr:hover { background: #f0f7ff; }
+        .search-header { background: #e8f0fe; font-weight: bold; }
+        .best { background: #d4edda !important; font-weight: bold; }
+        .k-col { font-weight: bold; color: #333; }
+        .speedup-col { color: #28a745; }
+    </style></head><body>
+    <h1>Benchmark de Scoring Metagenomico</h1>
+    """
+
+    for title, pivot, unit in [
+        ('Tiempos de Ejecucion (segundos)', pivot_time, 's'),
+        ('Speedup vs Python Secuencial', pivot_speedup, 'x'),
+        ('AUC por Implementacion', pivot_auc, '')
+    ]:
+        html += f'<h2>{title}</h2><table><tr><th>Busqueda</th><th>K</th>'
+        for impl in impl_order:
+            html += f'<th>{impl_labels[impl_order.index(impl)].replace(chr(10)," ")}</th>'
+        html += '</tr>'
+
+        for search in ['random', 'grid']:
+            first = True
+            for k in sorted(pivot.loc[search].index) if search in pivot.index else []:
+                cls = '' if not first else ' class="search-header"'
+                html += f'<tr{cls}>'
+                html += f'<td>{"Random" if first else ""}</td>'
+                html += f'<td class="k-col">{k_str_map.get(k,k)}</td>'
+                row = pivot.loc[(search, k)]
+                # Find best
+                best_val = row.min() if 'AUC' not in title else row.max()
+                for impl in impl_order:
+                    val = row.get(impl, None)
+                    if pd.isna(val):
+                        html += '<td>-</td>'
+                    else:
+                        is_best = abs(val - best_val) < 0.001 if 'Speedup' in title or 'AUC' in title else val == best_val
+                        cls = ' class="best"' if is_best else ''
+                        u = unit if unit else ''
+                        html += f'<td{cls}>{val:.4f}{u}</td>'
+                html += '</tr>'
+                first = False
+        html += '</table>'
+
+    html += "</body></html>"
+
+    with open(out_dir / 'summary.html', 'w') as f:
+        f.write(html)
+    print('  Summary: summary.html')
 
 
 # ── Main ────────────────────────────────────────────────────────────
 def main():
-    ap = argparse.ArgumentParser(description='Benchmark completo de scoring metagenómico')
-    ap.add_argument('--k-list', type=str, default='1000,10000',
-                    help='Valores de K separados por coma')
-    ap.add_argument('--workers', type=int, default=4,
-                    help='Workers/threads/ranks para impls paralelas')
-    ap.add_argument('--data-dir', type=str, default='',
-                    help='Data directory (default: auto)')
-    ap.add_argument('--output', type=Path, default=Path('results/plots'),
-                    help='Directorio para gráficas')
-    ap.add_argument('--no-plots', action='store_true',
-                    help='No generar gráficas Plotly')
+    ap = argparse.ArgumentParser(description='Benchmark completo 6 implementaciones')
+    ap.add_argument('--k-list', type=str, default='100,1000')
+    ap.add_argument('--workers', type=int, default=4)
+    ap.add_argument('--output', type=Path, default=Path('results/plots'))
+    ap.add_argument('--no-plots', action='store_true')
     args = ap.parse_args()
 
-    K_LIST = [int(k.strip()) for k in args.k_list.split(',')]
-    data_dir = args.data_dir or _data_path()
-    output_dir = _project_root() / args.output
-    output_dir.mkdir(parents=True, exist_ok=True)
+    K_LIST = [int(k) for k in args.k_list.split(',')]
+    data_dir = _data_dir()
+    out_dir = PROJECT / args.output; out_dir.mkdir(parents=True, exist_ok=True)
 
-    logger = BenchLogger()
-    all_results: list[BenchResult] = []
-    results_csv = _project_root() / 'results/benchmark_all.csv'
+    log = Log('benchmark_all', 10000, max(K_LIST))
+    all_results = []
+    csv_path = PROJECT / 'results/benchmark_all.csv'
 
-    logger.section('BENCHMARK COMPLETO - Scoring Metagenómico')
-    print(f'  K values:     {K_LIST}')
-    print(f'  Searches:     random, grid')
-    print(f'  Workers:      {args.workers}')
-    print(f'  Data dir:     {data_dir}')
-    print(f'  Environment:  {"WSL" if _in_wsl() else "Windows"}')
+    print(f'\n  K values: {K_LIST}  workers: {args.workers}  data: {data_dir}')
+    print(f'  Junction: {_junction()}')
+    print(f'  {"=" * 60}\n')
 
     for K in K_LIST:
         for search in ['random', 'grid']:
-            logger.table_header(K, search)
-            start = time.perf_counter()
-
-            for impl_name, runner in RUNNERS:
+            print(f'\n  {"-" * 60}')
+            print(f'  K={K:,}  search={search}')
+            print(f'  {"-" * 60}')
+            for name, runner in RUNNERS:
                 t0 = time.perf_counter()
-                r = runner(K, search, args.workers, data_dir, logger)
-                elapsed = time.perf_counter() - t0
-                logger.result_line(r, elapsed)
+                r = runner(K, search, args.workers, data_dir, log)
+                dt = time.perf_counter() - t0
+                if r.error:
+                    print(f'  {r.impl:25s}  ERROR: {r.error[:60]}')
+                else:
+                    sp = f'{dt / r.time_sec:.1f}x' if r.time_sec > 0 else 'N/A'
+                    print(f'  {r.impl:25s}  AUC={r.auc:.6f}  time={r.time_sec:.4f}s  speedup={sp}')
                 all_results.append(r)
 
-    # CSV output
-    with open(results_csv, 'w', newline='') as f:
+    # CSV
+    with open(csv_path, 'w', newline='') as f:
         w = csv.writer(f)
-        w.writerow(['impl', 'search', 'K', 'actual_K', 'workers',
-                     'time_sec', 'auc', 'consistency', 'w1', 'w2', 'w3', 'error'])
+        w.writerow(['impl','search','K','actual_K','workers','time_sec','auc','consistency','w1','w2','w3','error'])
         for r in all_results:
             w.writerow([r.impl, r.search, r.K, r.actual_K, r.workers,
-                        f'{r.time_sec:.6f}', f'{r.auc:.6f}', f'{r.consistency:.6f}',
-                        f'{r.w1:.6f}', f'{r.w2:.6f}', f'{r.w3:.6f}', r.error])
+                       f'{r.time_sec:.6f}', f'{r.auc:.6f}', f'{r.consistency:.6f}',
+                       f'{r.w1:.6f}', f'{r.w2:.6f}', f'{r.w3:.6f}', r.error])
 
-    # Summary
-    logger.summary(all_results)
-    print(f'\n  Resultados guardados en: {results_csv}')
+    # Summary table
+    print(f'\n  {"=" * 60}')
+    print(f'  {"RESUMEN":^58}')
+    print(f'  {"=" * 60}')
+    for search in ['random', 'grid']:
+        print(f'\n  search={search}')
+        print(f'  {"K":>8}  {"Impl":25s}  {"Time":>10s}  {"Speedup":>10s}  {"AUC":>10s}')
+        print(f'  {"-" * 65}')
+        for r in sorted(all_results, key=lambda x: (x.search != search, x.K, x.time_sec)):
+            if r.search != search or r.error: continue
+            base = next((br.time_sec for br in all_results if br.impl=='python-seq' and br.K==r.K and br.search==search and not br.error), None)
+            sp = f'{base/r.time_sec:.1f}x' if base and r.time_sec > 0 else '-'
+            print(f'  {r.K:>8}  {r.impl:25s}  {r.time_sec:>10.4f}s  {sp:>10s}  {r.auc:>10.6f}')
 
-    # Plots
+    print(f'\n  Resultados: {csv_path}')
+
     if not args.no_plots:
-        print(f'\n  Generando gráficas Plotly...')
-        make_plots(all_results, output_dir)
+        print(f'\n  Generando graficas...')
+        make_plots(all_results, out_dir)
+        print(f'  Graficas en: {out_dir}/')
 
 
 if __name__ == '__main__':
