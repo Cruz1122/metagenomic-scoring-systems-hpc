@@ -359,6 +359,8 @@ Propiedades:
 
 ## 6. Benchmark
 
+Comparacion pareada **random vs grid** sobre el mismo dataset, semilla y presupuestos K. El objetivo no es solo medir velocidad, sino mostrar como cambia el costo computacional y la calidad del scoring al variar la estrategia de busqueda y el paradigma de implementacion (Python, C, GPU).
+
 ### 6.1 Metricas base
 
 Cada ejecucion de benchmark produce las siguientes metricas por implementacion y configuracion:
@@ -366,7 +368,7 @@ Cada ejecucion de benchmark produce las siguientes metricas por implementacion y
 | Metrica | Descripcion | Formula |
 |---|---|---|
 | Tiempo (s) | Tiempo de busqueda excluyendo carga de datos | $t_{\mathrm{fin}} - t_{\mathrm{inicio}}$ |
-| Speedup | Ganancia respecto al baseline secuencial | $S = T_{\mathrm{python\_sequential}} / T_{\mathrm{impl}}$ |
+| Speedup | Ganancia respecto al baseline de su familia | $S_{\mathrm{py}} = T_{\mathrm{python\_sequential}} / T_{\mathrm{impl}}$; $S_{\mathrm{c}} = T_{\mathrm{c\_sequential}} / T_{\mathrm{impl}}$ |
 | Eficiencia | Speedup normalizado por unidades de paralelismo | $E = S / P$ |
 | Throughput | Candidatos evaluados por segundo | $K / T_{\mathrm{impl}}$ |
 | AUC | Area bajo la curva ROC del mejor W encontrado | $\max \mathrm{AUC}(y, \mathrm{Score}(W))$ |
@@ -384,18 +386,95 @@ Para GPU se recomienda reportar:
 - **Speedup** respecto al baseline secuencial como metrica secundaria.
 - **Eficiencia** solo si se aclara que es una metrica heuristica referida a SMs, no a unidades de ejecucion equivalentes a CPU.
 
-### 6.3 Mediciones pendientes
+### 6.3 Configuracion de la medicion
 
-Las siguientes graficas se generaran a partir de los resultados del benchmark:
+Medicion principal en [`results/benchmark.csv`](results/benchmark.csv): **88 filas validas** (11 configuraciones x 8 valores de K). Cada implementacion se evalua en **random** y **grid** bajo las mismas condiciones, lo que permite una comparacion pareada entre estrategias de busqueda.
 
-- Tiempo vs. K (una curva por implementacion).
-- Speedup vs. K (una curva por implementacion paralela).
-- Eficiencia vs. K (solo CPU paralela: multicore, OpenMP, MPI).
-- Throughput (candidatos/segundo) vs. K.
-- AUC vs. K (calidad de la solucion encontrada).
-- Mejor W por implementacion (comparacion de pesos optimos).
-- Iteracion donde aparece el mejor resultado (convergencia).
-- Heatmap implementacion x K con tiempo o speedup.
+| Parametro | Valor |
+|---|---|
+| Dataset | `synthetic_CRC2000x10000_balanced` (10 000 items, 2 000 muestras) |
+| Estrategias | `random` y `grid` (comparacion pareada) |
+| Seed | 42 |
+| Valores de K | 5 000, 10 000, 20 000, 50 000, 250 000, 500 000, 1 000 000, 2 000 000 |
+| Implementaciones | Python secuencial, Python multicore, C secuencial (solo random), C + OpenMP, C + MPI, PyCUDA |
+| Paralelismo | Python multicore, C OpenMP y C MPI: 8 unidades; PyCUDA: 14 SMs |
+| Hardware | Intel Core i5-10300H (4C/8T), 23.3 GB RAM, NVIDIA GTX 1650 (896 CUDA cores) |
+
+**Nota sobre baselines:** el CSV incluye `c_sequential` solo en random. Para calcular speedup de implementaciones C en grid, se usa `c_sequential` random como referencia de lenguaje; esto se declara explicitamente en las graficas para no mezclar estrategia con paralelizacion.
+
+### 6.4 Resultados destacados (K = 2 000 000)
+
+#### Random search
+
+| Implementacion | Tiempo (s) | Tiempo (h) | AUC | Throughput (cand/s) | Speedup vs baseline propio |
+|---|---|---|---|---|---|
+| C OpenMP | 5 650.1 | 1.57 | 0.792837 | 354.0 | 7.09x vs C secuencial |
+| PyCUDA | 7 160.2 | 1.99 | 0.792827 | 279.3 | 7.27x vs Python secuencial |
+| C MPI | 9 434.9 | 2.62 | 0.792845 | 212.0 | 4.25x vs C secuencial |
+| C secuencial | 40 083.8 | 11.13 | 0.792827 | 49.9 | 1.00x (baseline C) |
+| Python multicore | 46 586.5 | 12.94 | 0.792827 | 42.9 | 1.12x vs Python secuencial |
+| Python secuencial | 52 033.0 | 14.45 | 0.792827 | 38.4 | 1.00x (baseline Python) |
+
+#### Grid search
+
+| Implementacion | Tiempo (s) | Tiempo (h) | AUC | Throughput (cand/s) | Speedup vs baseline propio |
+|---|---|---|---|---|---|
+| PyCUDA | 4 665.5 | 1.30 | 0.792825 | 428.7 | 20.9x vs Python secuencial grid |
+| C OpenMP | 10 359.5 | 2.88 | 0.792817 | 193.1 | 3.87x vs C secuencial random* |
+| C MPI | 15 222.2 | 4.23 | 0.792817 | 131.4 | 2.63x vs C secuencial random* |
+| Python multicore | 87 968.3 | 24.44 | 0.792817 | 22.7 | 1.11x vs Python secuencial grid |
+| Python secuencial | 97 410.3 | 27.06 | 0.792817 | 20.5 | 1.00x (baseline Python grid) |
+
+\* Baseline C tomado de `c_sequential` random (no existe `c_sequential` grid en el benchmark).
+
+**Lectura integrada:**
+
+- **Tiempo:** crece casi proporcionalmente con K en ambas estrategias. En random, C + OpenMP es el mas rapido en CPU (5 650.1 s); en grid, PyCUDA lidera (4 665.5 s). La GPU aporta mas ventaja cuando la exploracion es sistematica (grid) que cuando es estocastica (random).
+- **Calidad:** el AUC se concentra alrededor de 0.7928 en todos los casos. Random alcanza el mejor valor global (0.792845, C + MPI); grid converge rapido pero se estanca cerca de 0.792825. La diferencia importante no es la calidad, sino el costo computacional para llegar a ella.
+- **Speedup:** en K = 2 000 000, PyCUDA-grid logra el mayor speedup relativo (20.9x frente a Python secuencial grid), mientras C + OpenMP-random obtiene el mejor speedup CPU (7.1x frente a C secuencial).
+- **Recomendacion practica:** si solo hay CPU, C + OpenMP con random search ofrece el mejor equilibrio tiempo-AUC. Si hay GPU disponible y la estrategia es grid, PyCUDA domina en tiempo y throughput sin sacrificar calidad de forma relevante.
+
+### 6.5 Graficas
+
+Las graficas se generan a partir de `results/benchmark.csv` y se almacenan en `results/plots/`:
+
+| Figura | Archivo | Contenido |
+|---|---|---|
+| Fig. 1 | [`fig1_runtime_random_grid.png`](results/plots/fig1_runtime_random_grid.png) | Tiempo de ejecucion vs K (random y grid) |
+| Fig. 2 | [`fig2_speedup_random_grid.png`](results/plots/fig2_speedup_random_grid.png) | Speedup vs baseline propio por familia |
+| Fig. 3 | [`fig3_auc_random_grid.png`](results/plots/fig3_auc_random_grid.png) | Convergencia del AUC (random y grid) |
+| Fig. 4 | [`fig4_pareto_random_grid.png`](results/plots/fig4_pareto_random_grid.png) | Relacion costo-calidad en K = 2 000 000 |
+| Fig. 5 | [`fig5_throughput_random_grid.png`](results/plots/fig5_throughput_random_grid.png) | Throughput (candidatos/s) en K = 2 000 000 |
+
+#### Figura 1. Tiempo de ejecucion por estrategia
+
+![Tiempo vs K — random y grid](results/plots/fig1_runtime_random_grid.png)
+
+El tiempo crece casi proporcionalmente con K en ambas estrategias. En random, C + OpenMP es el mas rapido al mayor presupuesto (5 650.1 s en K = 2 000 000); en grid, PyCUDA queda primero (4 665.5 s). Lectura practica: para CPU gana OpenMP, mientras que grid se beneficia especialmente de la GPU.
+
+#### Figura 2. Speedup con baseline propio
+
+![Speedup vs baseline propio — random y grid](results/plots/fig2_speedup_random_grid.png)
+
+El speedup se calcula contra el baseline de su propia familia: Python multicore frente a Python secuencial, PyCUDA frente a Python secuencial y C/OpenMP-MPI frente a C secuencial random (porque el benchmark no incluye C secuencial grid). En K = 2 000 000, PyCUDA-grid logra el mayor speedup relativo (20.9x), mientras C + OpenMP-random alcanza el mejor speedup CPU (7.1x).
+
+#### Figura 3. Convergencia de AUC
+
+![Convergencia AUC — random y grid](results/plots/fig3_auc_random_grid.png)
+
+La calidad del scoring cambia muy poco: todos los valores quedan alrededor de 0.7928. Random alcanza el mejor AUC final (0.792845, C + MPI), mientras grid llega rapido a una zona competitiva pero se estanca cerca de 0.792825 al mayor K. La leccion pedagogica: paralelizar o cambiar de lenguaje acelera la busqueda sin alterar sustancialmente la calidad del mejor W encontrado.
+
+#### Figura 4. Pareto tiempo vs AUC
+
+![Pareto tiempo-AUC — random y grid](results/plots/fig4_pareto_random_grid.png)
+
+El grafico Pareto separa rendimiento y calidad. En random, C + OpenMP ofrece el mejor equilibrio tiempo-AUC; C + MPI obtiene el AUC mas alto, pero tarda mas. En grid, PyCUDA domina en tiempo, aunque no alcanza el mejor AUC global de random. Esta es la figura mas util para justificar la implementacion recomendada en una sustentacion.
+
+#### Figura 5. Throughput final
+
+![Throughput final — random y grid](results/plots/fig5_throughput_random_grid.png)
+
+El throughput confirma la misma historia en una metrica mas intuitiva. PyCUDA-grid procesa mas candidatos por segundo (428.7 cand/s) y C + OpenMP-random es el mejor caso CPU (354.0 cand/s). Python queda muy por debajo, incluso con multiprocessing, lo que evidencia overhead de procesos y menor eficiencia de ejecucion.
 
 ---
 
@@ -458,7 +537,8 @@ metagenomic-scoring-systems-hpc/
 │   └── validate_benchmark_csv.py   valida formato CSV de salida
 ├── docs/                           documentacion tecnica
 ├── results/
-│   └── plots/                      graficas de benchmark (generadas)
+│   ├── benchmark.csv               mediciones (11 configs x 8 K, random + grid)
+│   └── plots/                      fig1–fig5 (random vs grid: tiempo, speedup, AUC, pareto, throughput)
 ├── run_all.sh                      pipeline de benchmark automatizado
 ├── Makefile                        automatizacion: data, python-*, c-*, benchmark, clean
 ├── PROJECT.md                      especificacion contractual del proyecto
@@ -558,4 +638,3 @@ La documentacion detallada se encuentra en el directorio `docs/`:
 | `docs/10_estrategias_busqueda.md` | Estrategias de busqueda: random, grid, hybrid |
 | `docs/11_benchmark.md` | Benchmark: metricas, metodologia, graficas |
 | `PROJECT.md` | Especificacion contractual completa del proyecto |
-| `fuente_real_dataset_sintetico_crc.md` | Referencia biologica del dataset sintetico |

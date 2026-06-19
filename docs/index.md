@@ -26,7 +26,7 @@ Este directorio contiene la documentacion tecnica detallada del proyecto. Cada a
 | Archivo | Contenido |
 |---|---|
 | [10_estrategias_busqueda.md](10_estrategias_busqueda.md) | Estrategias de busqueda: random, grid, hybrid |
-| [11_benchmark.md](11_benchmark.md) | Benchmark: metricas, metodologia, graficas |
+| [11_benchmark.md](11_benchmark.md) | Benchmark: metricas, resultados K=2M, graficas en results/plots/ |
 
 ## Referencias externas
 

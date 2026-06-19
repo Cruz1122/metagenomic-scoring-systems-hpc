@@ -251,7 +251,8 @@ metagenomic-scoring-systems-hpc/
 │   ├── benchmark_pipeline.py    → [IMPLEMENTADO] pipeline multi-K + detección hardware
 │   └── validate_benchmark_csv.py→ [IMPLEMENTADO] valida formato CSV
 ├── results/
-│   └── plots/
+│   ├── benchmark.csv            → mediciones completas (random, K hasta 2M)
+│   └── plots/                   → fig1_runtime … fig5_throughput (PNG)
 ├── docs/                       → especificación técnica (12 .md + prompts/)
 ├── run_all.sh                  → pipeline benchmark
 ├── Makefile
